@@ -31,7 +31,9 @@ GeoJSON field exports
         ↓
   convert_observations.py       # parse field notes → structured CSV
         ↓
-  combinedv3.csv                # merged observation dataset (all sites)
+  combined.csv                  # merged observation dataset (all sites)
+        ↓
+  combinedv3.csv                # manually edited dataset to add final ID for each observation
         ↓
   runmicroenv.R                 # ERA5 climate · DTM · landcover
     └── get_microenv.R          # vegetation · soil · runpointmodela()
@@ -125,5 +127,5 @@ canopymicroenv/
 
 ---
 
-*Lizeth Estevez Tobar — Universidad de Bonn, 2026*
+*Lizeth Estévez Tobar — Universidad de Bonn, 2026*
 *Supervisor: Juliano Sarmento Cabral*
