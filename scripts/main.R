@@ -1,183 +1,222 @@
-# patches
-original_wf_request <- ecmwfr::wf_request
-assignInNamespace(
-  "wf_request",
-  function(request, user = "ecmwfr", transfer = TRUE, path = tempdir(),
-           time_out = 3600, retry = 120, job_name, verbose = TRUE) {
-    original_wf_request(
-      request  = request,
-      user     = user,
-      transfer = transfer,
-      path     = path,
-      time_out = time_out,
-      retry    = retry,
-      verbose  = verbose
-    )
-  },
-  ns = "ecmwfr"
-)
-
-assignInNamespace(
-  "reflectance_calc",
-  function(alb, lai, x, plotprogress = TRUE, maxiter = 50, tol = 0.001, bwgt = 0.5) {
-    e1  <- terra::intersect(terra::ext(lai), terra::ext(alb))
-    e   <- terra::intersect(e1, terra::ext(x))
-    lai <- terra::crop(lai, e)
-    alb <- terra::crop(alb, e)
-    x   <- terra::crop(x, e)
-    all_same <- terra::compareGeom(lai, alb, x)
-    if (all_same) {
-      tst  <- exp(-mean(as.vector(lai), na.rm = TRUE))
-      lref <- (x * 0 + 0.5) * (1 - bwgt) + bwgt * alb  # fix: wgt -> bwgt
-      gref <- x * 0 + 0.15
-      mxdif <- tol * 10
-      paim  <- as.matrix(lai, wide = TRUE)
-      xm    <- as.matrix(x,   wide = TRUE)
-      albm  <- as.matrix(alb, wide = TRUE)
-      itr   <- 1
-      while (mxdif > tol) {
-        if (tst < 0.5) {
-          lref2 <- microclimdata:::.rast(microclimdata:::find_lref(paim, as.matrix(gref, wide = TRUE), xm, albm), x)
-          lref2 <- microclimdata:::.fillna(lref2, x, zerotoNA = FALSE)
-          gref2 <- microclimdata:::.rast(microclimdata:::find_gref(as.matrix(lref2, wide = TRUE), paim, xm, albm), x)
-          gref2 <- microclimdata:::.fillna(gref2, x, zerotoNA = FALSE)
-        } else {
-          gref2 <- microclimdata:::.rast(microclimdata:::find_gref(as.matrix(lref, wide = TRUE), paim, xm, albm), x)
-          gref2 <- microclimdata:::.fillna(gref2, x, zerotoNA = FALSE)
-          lref2 <- microclimdata:::.rast(microclimdata:::find_lref(paim, as.matrix(gref, wide = TRUE), xm, albm), x)
-          lref2 <- microclimdata:::.fillna(lref2, x, zerotoNA = FALSE)
-        }
-        gref  <- bwgt * gref + (1 - bwgt) * gref2
-        lref  <- bwgt * lref + (1 - bwgt) * lref2
-        mxdif1 <- mean(abs(as.vector(gref) - as.vector(gref2)), na.rm = TRUE)
-        mxdif2 <- mean(abs(as.vector(lref) - as.vector(lref2)), na.rm = TRUE)
-        mxdif  <- max(mxdif1, mxdif2)
-        itr <- itr + 1
-        if (itr > maxiter) mxdif <- 0
-      }
-    } else {
-      stop("Geometries of input rasters do not match")
-    }
-    return(list(gref = gref, lref = lref))
-  },
-  ns = "microclimdata"
-)
-
-library(rgee)
+# main.R
+# Canopy colonization model — vertical niche partitioning of epiphytic Maxillariinae
+# Lizeth Estévez Tobar — University of Bonn, 2026
+# ─────────────────────────────────────────────────────────────────────────────
+library(dplyr)
 library(readr)
-library(mcera5)
-library(microclimf)
-library(microclimdata)
-library(terra)
-# ── specify python environment to use ── 
-reticulate::use_python("/Users/lizethestevezt/miniforge3/bin/python", required = TRUE)
+library(rgee)
+library(rgl)
+library(plotly)
+source("scripts/helper_functions.R")
+source("scripts/get_climateinputs.R")
+source("scripts/get_microenv.R")
+source("scripts/get_colonization.R")
+source("scripts/paths.R")
 
-# ── logging ──────────────────────────────────────────────────────────────────
-log_file <- file.path("/Users/lizethestevezt/canopymicroenv/logs",
-                      sprintf("run_micropoint_%s.log", format(Sys.time(), "%Y%m%d_%H%M%S")))
+# ── Setup virtual environment ─────────────────────────────────────────────────
+# reticulate::use_virtualenv("/Users/lizethestevezt/.virtualenvs/rgee", required = TRUE)
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+dir.create(LOGS_DIR, recursive = TRUE, showWarnings = FALSE)
+log_file <- file.path(
+  LOGS_DIR,
+  sprintf("main_%s.log", format(Sys.time(), "%Y%m%d_%H%M%S"))
+)
 log_msg <- function(msg) {
   stamped <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
   message(stamped)
   cat(stamped, "\n", file = log_file, append = TRUE)
 }
-log_msg("Script started")
+log_msg("main.R started")
+# ── STEP 1: Load microclimate outputs from getmicroenv.R ─────────────────────
+# Models are saved per site — load all and merge into one list
+model_files <- list.files(PROCESSED_DIR, pattern = "^pointmodel_.*\\.rds$", full.names = TRUE)
 
-# ── source functions, import credentials and site information ── 
-source("scripts/functions.R")
-mycredentials <- readRDS("/Users/lizethestevezt/canopymicroenv/credentials.rds")
-site <- make_site("data/csv/combinedv3.csv")
+models <- list()
+for (f in model_files) {
+  site_models <- readRDS(f)
+  models <- c(models, site_models)
+}
 
-# 0 make the SpatialRaster, TemplateRaster, TimePeriodObjects and import directories
-source("scripts/paths.R") # here I need a small function that checks if all directories
-                          # exist, so creates them if necessary
+log_msg(sprintf(
+  "Loaded %d height models across %d sites",
+  length(models), length(model_files)
+))
 
+# Check — any valid cell per site
+sapply(c("Maquipucuna", "Mashpi", "MindoTarabita", "MiradorMindo", "Yanayacu"), function(s) {
+  site_keys <- names(models)[grepl(s, names(models))]
+  sum(sapply(site_keys, function(k) {
+    any(sapply(models[[k]], function(cell) inherits(cell, "micropoint")))
+  }))
+})
 
-raster <- terra::rast(nrows = 2, ncols = 2,
-                             xmin  = site$lon_min, xmax = site$lon_max,
-                             ymin  = site$lat_min, ymax = site$lat_max,
-                             crs   = "EPSG:4326")
-raster_utm <- terra::project(raster, "EPSG:32717")
-r_dtm <- terra::rast(nrows = 50, ncols = 50, xmin  = site$lon_min, xmax = site$lon_max,
-                     ymin  = site$lat_min, ymax = site$lat_max, crs = "EPSG:4326")
-r_buffered <- terra::rast(
-  nrows = 2, ncols = 2,
-  xmin  = site$lon_min - 0.5,
-  xmax  = site$lon_max + 0.5,
-  ymin  = site$lat_min - 0.5,
-  ymax  = site$lat_max + 0.5,
-  crs   = "EPSG:4326"
+# ── STEP 2: Extract microclimate niche ─────────────
+prep <- prepare_observations("data/csv/combinedv3.csv", models)
+obs <- prep$obs
+niches <- extract_niches(obs, models, prep$valid_per_model)
+saveRDS(niches, file.path(PROCESSED_DIR, "niches.rds"))
+# ── STEP 3: Run colonization model ───────────────────────────────────────────
+sites_df <- make_sites("data/csv/combinedv3.csv", pad = 0.15)
+site <- sites_df[sites_df$Site == "Maquipucuna", ]
+res <- 10  # set once, use everywhere
+# need xDim/yDim first — compute them the same way runcolonization() does
+site_obs    <- niches[niches$Area_or_Site == site$Site, ]
+lat_range_m <- (max(site_obs$lat) - min(site_obs$lat)) * 111000
+lon_range_m <- (max(site_obs$lon) - min(site_obs$lon)) * 111000 *
+  cos(mean(site_obs$lat) * pi / 180)
+xDim <- max(round(lon_range_m / res), 10) + 3
+yDim <- max(round(lat_range_m / res), 10) + 3
+
+# this uses earth engine so authenticate and initialize
+ee_Authenticate()
+ee_Initialize(project = "ee-lizethestevezt")
+canopy_grid <- get_canopy_grid(site, xDim, yDim,
+  resolution = res,
+  out_dir = file.path(RAW_DIR, site$Site)
 )
 
-TemplateRaster <- terra::rast(
-  extent     = terra::ext(site$lon_min, site$lon_max,
-                          site$lat_min, site$lat_max),
-  resolution = 0.0001,
-  crs        = "EPSG:4326")
-tme_start <- as.POSIXlt(site$tme_start, tz = "UTC")
-tme_end <- as.POSIXlt(site$tme_end, tz = "UTC")
-
-tme <- as.POSIXlt(seq(from = tme_start, to = tme_end, by = "day"))
-tmeMonth <- as.POSIXlt(seq(
-  from = as.POSIXlt(format(tme_start, "%Y-%m-01 00:00:00"), tz = "UTC"),
-  to   = as.POSIXlt(format(seq(as.POSIXlt(format(tme_start, "%Y-%m-01"), tz="UTC"), 
-                               by = "month", length.out = 2)[2] - 3600, 
-                           "%Y-%m-%d %H:00:00"), tz = "UTC"), by   = "day"))
-tmeHourly <- as.POSIXlt(seq(
-  from = as.POSIXlt(format(tme_start, "%Y-%m-01 00:00:00"), tz = "UTC"),
-  to   = as.POSIXlt(format(seq(as.POSIXlt(format(tme_start, "%Y-%m-01"), tz="UTC"),
-                               by = "month", length.out = 2)[2] - 3600,
-                           "%Y-%m-%d %H:00:00"), tz = "UTC"), by   = "hour"))
+# setup parameters
+params <- list(
+  # ── Growth parameters (Mondragón et al. 2007 — pseudobulb size increments) ──
+  # size thresholds for stage transitions — not growth rates per se
+  beta0GrowthS = 0.22,  # mean size of seedlings (pseudobulbs)
+  beta0GrowthJ = 0.45,  # mean size of juveniles (pseudobulbs)
+  beta0GrowthA = 1.40,  # mean size of adults (pseudobulbs)
   
-# 1) get input information
-  # weather data
-    weatherdata  <- get_weather(site = site, credentials = mycredentials, 
-                            r = r_buffered, tme = tmeHourly, dir = ERA5_DIR) 
-  # dtm data, not masking cause we're not in coastal areas
-    dtmdata <- get_dtm(r = r_dtm, dir = DTM_DIR, mask = FALSE)
-    dtmdata <- terra::project(dtmdata, "EPSG:4326")
-  # landcover data, needed for both vegetation and soil data, earth engine needed 
-    ee_Authenticate()
-    ee_Initialize(project = "ee-lizethestevezt", user = "lizethestevezt@gmail.com", drive = TRUE)
-    landcoverdata <- get_landcover(site = site, r = raster,  out_dir = LCOVER_DIR)
-  # vegetation data used in the model 
-    vegetationdata <- get_vegetation(r = raster, lcover = landcoverdata, tme = tmeHourly, 
-                                 lat = mean(c(site$lat_min, site$lat_max)),
-                                 lon = mean(c(site$lon_min, site$lon_max)))
-    for (n in names(vegetationdata)) {
-      if (class(vegetationdata[[n]])[1] == "PackedSpatRaster")
-        vegetationdata[[n]] <- terra::unwrap(vegetationdata[[n]])
-    }
-  # soil because it's important (:
-    soildata <- get_soil(r = raster, template = TemplateRaster, 
-                     tme = tmeMonth, credentials = mycredentials, 
-                     landcover = landcoverdata, dir = SOIL_DIR, albedodir = ALB_DIR)
-    for (n in names(soildata)) {
-      if (class(soildata[[n]])[1] == "PackedSpatRaster")
-        soildata[[n]] <- terra::unwrap(soildata[[n]])
-    }
+  beta1Growth  = 0.8,   # size autocorrelation — how much current size predicts next size
+  # prototype: 0.3 (slower transitions); literature: 0.8
+  sigma        = 0.5,   # residual growth variance (stochastic noise around mean growth)
+  # prototype: 0.2; literature: 0.5
+  
+  # ── Survival parameters (Raventós et al. 2015; Mondragón et al. 2007) ──
+  # logistic regression intercepts — higher = better survival
+  # s = 1 / (1 + exp(-(beta0_stage + beta1 * size - climate_penalty)))
+  beta0Seedling = -1.5,  # literature value; prototype forgiving: 1.5
+  beta0Juvenile = -0.5,  # literature value; prototype forgiving: 1.0
+  beta0Adult    =  1.0,  # literature value; prototype forgiving: 2.5
+  # adults have high stasis (Zotz 1998)
+  
+  beta1 = 0.105,  # size effect on survival — larger individuals survive better
+  
+  # ── Reproduction parameters ──
+  p_flower = 0.80,   # proportion of adults flowering per year (Winkler et al. 2009)
+  p_poll   = 0.05,   # pollination success / fruit set probability
+  # prototype relaxed: 0.50; literature: 0.05
+  p_germ   = 0.001,  # mycorrhizal germination probability (Taylor & Bruns 1999)
+  # prototype relaxed: 0.50; literature: 0.001
+  p_s1     = 0.83,   # first-year seedling survival (Zotz 1998)
+  # prototype relaxed: 0.90
+  
+  # ── Dispersal parameters (Murren & Ellison 1998) ──
+  Ut       = 1,   # terminal seed fall velocity (m/s) — affects mean dispersal distance
+  lambda   = 1,   # kernel spread factor — higher = wider dispersal
+  canopy_z = mean(canopy_grid, na.rm = TRUE)  # mean canopy height across site (m)
+)
 
-# 2) Use inputs in point model within a loop 
-    tme_model <- as.POSIXlt(tmeHourly, tz = "UTC")
-    heights   <- seq(from = site$hObs_min, to = site$hObs_max, by = 0.2)
-    models    <- list()
-    
-    log_msg(sprintf("Running point model: %.1f – %.1f m (%d steps)",
-                    min(heights), max(heights), length(heights)))
-    
-    for (h in heights) {
-      message("")  # blank line before each step
-      log_msg(sprintf("  runpointmodela @ %.1f m", h))
-      models[[sprintf("h%.1f", h)]] <- microclimf::runpointmodela(
-        climarrayr = weatherdata,
-        tme        = tme_model,
-        reqhgt     = h,
-        dtm        = dtmdata,
-        vegp       = vegetationdata,
-        soilc      = soildata
-      )
-      message("")  # blank line after progress bar clears
-    }
-    
-    log_msg(sprintf("Saving %d models to pointmodel1.rds", length(models)))
-    saveRDS(models, file.path(BASE_DIR, "data/processed/pointmodelv1.rds"))
-    log_msg("Done")
+forgivingparams <- list(
+  # ── Growth parameters ──
+  beta0GrowthS = 0.22,  # mean size of seedlings (pseudobulbs)
+  beta0GrowthJ = 0.45,  # mean size of juveniles (pseudobulbs)
+  beta0GrowthA = 1.40,  # mean size of adults (pseudobulbs)
+  
+  beta1Growth  = 0.4,   # size autocorrelation — literature: 0.8; forgiving: 0.5
+  sigma        = 0.2,   # residual growth variance — literature: 0.5; forgiving: 0.3
+  
+  # ── Survival parameters ──
+  beta0Seedling =  0.8,  # literature: -1.5; forgiving: 0.5
+  # gives ~57% monthly survival at relhum=85%
+  beta0Juvenile =  1,  # literature: -0.5; forgiving: 0.8
+  # gives ~68% monthly survival
+  beta0Adult    =  1.5,  # literature: 1.0; forgiving: 1.5
+  # gives ~82% monthly survival; stasis dominates (Zotz 1998)
+  
+  beta1 = 0.105,  # size effect on survival — larger individuals survive better
+  
+  # ── Reproduction parameters ──
+  p_flower = 0.80,   # proportion of adults flowering (Winkler et al. 2009)
+  p_poll   = 0.20,   # pollination success — literature: 0.05; forgiving: 0.20
+  p_germ   = 0.1,   # mycorrhizal germination — literature: 0.001; forgiving: 0.05
+  p_s1     = 0.83,   # first-year seedling survival (Zotz 1998)
+  # repRate = 0.80 * 0.20 * 0.05 * 0.83 = 0.00664
+  # reproduce(6, 0.00664) → ~4% chance of 1 seed per adult per year
+  # with forgiving survival adults accumulate → more seeds over time
+  
+  # ── Dispersal parameters (Murren & Ellison 1998) ──
+  Ut       = 1,   # terminal seed fall velocity (m/s)
+  lambda   = 1,   # kernel spread factor
+  canopy_z = mean(canopy_grid, na.rm = TRUE)
+)
+
+superforgivingparams <- list(
+  # ── Growth parameters ──
+  beta0GrowthS = 0.22,  # mean size of seedlings (pseudobulbs)
+  beta0GrowthJ = 0.45,  # mean size of juveniles (pseudobulbs)
+  beta0GrowthA = 1.40,  # mean size of adults (pseudobulbs)
+  
+  beta1Growth  = 0.3,   # slow transitions — literature: 0.8
+  sigma        = 0.8,   # very low variance — predictable slow growth
+  
+  # ── Survival parameters ──
+  # at relhum=85%, dry_penalty=0.15; at temp=17°C, temp_penalty=0
+  beta0Seedling =  2.0,  # ~88% monthly survival → ~21% annual
+  beta0Juvenile =  2.5,  # ~92% monthly survival → ~37% annual
+  beta0Adult    =  3.0,  # ~95% monthly survival → ~54% annual
+  
+  beta1 = 0.105,  # size effect on survival
+  
+  # ── Reproduction parameters ──
+  # repRate = 0.80 * 0.50 * 0.30 * 0.83 = 0.0996 ≈ 0.10
+  # reproduce(7, 0.10) → guaranteed 1 seed most calls
+  p_flower = 0.80,  # proportion of adults flowering
+  p_poll   = 0.50,  # pollination success
+  p_germ   = 0.30,  # mycorrhizal germination
+  p_s1     = 0.83,  # first-year seedling survival (Zotz 1998)
+  
+  # ── Dispersal parameters ──
+  Ut       = 1,
+  lambda   = 1,
+  canopy_z = mean(canopy_grid, na.rm = TRUE)
+)
+
+# run log 
+dir.create(LOGS_DIR, recursive = TRUE, showWarnings = FALSE)
+log_file <- file.path(
+  LOGS_DIR,
+  sprintf("runcolonization_%s.log", format(Sys.time(), "%Y%m%d_%H%M%S"))
+)
+log_msg <- function(msg) {
+  stamped <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
+  message(stamped)
+  cat(stamped, "\n", file = log_file, append = TRUE)
+}
+log_msg("colonization run started")
+
+# for viewing
+
+result <- runcolonization(
+  site = site,
+  niches = niches,
+  canopy_grid = canopy_grid,
+  models = models,
+  valid_per_model = prep$valid_per_model,
+  timesteps = 40, # short run for debugging
+  resolution = res,
+  carCap = 1,
+  maxDisp = 5,
+  spinup = 15,
+  stochastic = FALSE,
+  Visualize = TRUE,
+  sleeptime = 0.2,
+  visualize_dispersion = FALSE,
+  parameters = superforgivingparams
+)
+
+rgl::rglwidget()
+plot_3d_abundance(
+  result
+)
+
+plot_total_abundance(result, t = 40)
+
+# ── STEP 4: Analysis + figures ───────────────────────────────────────────────

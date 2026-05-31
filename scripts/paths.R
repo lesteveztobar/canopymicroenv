@@ -1,9 +1,25 @@
-# paths
-BASE_DIR <- "/Users/lizethestevezt/canopymicroenv"
-RAW_DIR <- file.path(BASE_DIR, "data/raw") 
-ERA5_DIR <- file.path(RAW_DIR, "ERA5") 
-SOIL_DIR <- file.path(RAW_DIR, "SOIL") 
-LAI_DIR <- file.path(RAW_DIR, "LAI") 
-LCOVER_DIR <- file.path(RAW_DIR, "LANDCOVER") 
-ALB_DIR <- file.path(RAW_DIR, "ALBEDO") 
-DTM_DIR <- file.path(RAW_DIR, "DTM") 
+# paths.R
+# Project directory constants for canopymicroenv
+# All paths derived from BASE_DIR — change only BASE_DIR if project moves
+# Per-site subdirectories (era5, dtm, soil, etc.) are built dynamically
+# inside the site loop in getmicroenv.R using BASE_DIR as the root
+# Lizeth Estévez Tobar — University of Bonn, 2026
+# ─────────────────────────────────────────────────────────────────────────────
+
+BASE_DIR      <- "/Users/lizethestevezt/canopymicroenv"
+
+# data
+RAW_DIR       <- file.path(BASE_DIR, "data", "raw")
+CSV_DIR       <- file.path(BASE_DIR, "data", "csv")
+PROCESSED_DIR <- file.path(BASE_DIR, "data", "processed")
+
+# project
+SCRIPTS_DIR   <- file.path(BASE_DIR, "scripts")
+OUTPUT_DIR    <- file.path(BASE_DIR, "output")
+LOGS_DIR      <- file.path(BASE_DIR, "logs")
+
+# create all directories if they don't exist
+# showWarnings = FALSE silently skips dirs that already exist
+for (d in c(RAW_DIR, CSV_DIR, PROCESSED_DIR, SCRIPTS_DIR, OUTPUT_DIR, LOGS_DIR)) {
+  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+}

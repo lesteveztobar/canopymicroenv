@@ -1,12 +1,13 @@
-# Column types for csv interpreting
-COMBINED_COL_TYPES <- readr::cols(Source = col_character(), Area_or_Site = col_character(), 
-                                  lat = col_double(), lon = col_double(), Elevation_m = col_character(), 
-                                  FieldID = col_character(), Abundance = col_double(), 
-                                  Height_m = col_double(), CanopyHeight_m = col_double(), 
-                                  note = col_character(), FinalID = col_character(), Genus = col_character(), 
-                                  species = col_character())
+# get_climate_inputs.R
+# Data acquisition pipeline for canopymicroenv
+# Lizeth Estévez Tobar — University of Bonn, 2026
 
-# functions
+# ── Site preparation ──────────────────────────────────────────────────────────
+
+# Reads the combined CSV and derives a single-row site summary with:
+# - bounding box (lat/lon min/max) for ERA5 and raster construction
+# - time window (tme_start/tme_end) for ERA5 request
+# - observed height range (hObs_min/hObs_max) for model height sequence
 make_site <- function(csv_path) {
   message("Reading combined CSV...")
   df <- read_csv(csv_path,
@@ -41,6 +42,46 @@ make_site <- function(csv_path) {
   return(site)
 }
 
+# Reads the combined CSV and derives a per-site summary dataframe with one row
+# per field site (Area_or_Site), each with:
+# - bounding box padded by pad° for ERA5 cell coverage
+# - time window from actual observation datetimes at that site
+# - observed height range for the model height sequence
+# Use this for the per-site loop in getmicroenv.R; use make_site() when running
+# a single AllSites bounding box instead.
+make_sites <- function(csv_path, pad = 0.01) {
+  message("Reading combined CSV...")
+  df <- read_csv(csv_path,
+                 na        = c("", "NA", "N/A"),
+                 col_types = COMBINED_COL_TYPES) |>
+    dplyr::filter(!is.na(Source), !is.na(Area_or_Site))
+  
+  df |>
+    dplyr::filter(!is.na(lat), !is.na(lon), !is.na(datetime), !is.na(Height_m)) |>
+    dplyr::mutate(
+      lat      = as.numeric(lat),
+      lon      = as.numeric(lon),
+      datetime = as.POSIXlt(datetime, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+    ) |>
+    dplyr::group_by(Area_or_Site) |>
+    dplyr::summarise(
+      lat_min   = min(lat)      - pad,
+      lat_max   = max(lat)      + pad,
+      lon_min   = min(lon)      - pad,
+      lon_max   = max(lon)      + pad,
+      tme_start = min(datetime),
+      tme_end   = max(datetime),
+      hObs_min  = min(Height_m, na.rm = TRUE),
+      hObs_max  = max(Height_m, na.rm = TRUE),
+      .groups   = "drop"
+    ) |>
+    dplyr::rename(Site = Area_or_Site)
+}
+# ── ERA5 data acquisition ─────────────────────────────────────────────────────
+
+# Merges the three ERA5 stepType netCDF files (accum, avg, instant) that CDS
+# delivers separately into one combined file. Renames radiation variables to
+# match the names expected by microclimdata::era5_process()
 merge_era5_steptype_files <- function(pathin, pathout) {
   library(ncdf4)
   
@@ -81,6 +122,9 @@ merge_era5_steptype_files <- function(pathin, pathout) {
   return(pathout)
 }
 
+# ERA5 land-sea mask (lsm) sometimes has near-land cells with values just below 1
+# (e.g. 0.96) which microclimdata treats as ocean and excludes.
+# This fix rounds near-land cells up to 1 so they are included in processing.
 fix_lsm <- function(nc_path) {
   nc  <- ncdf4::nc_open(nc_path, write = TRUE)
   lsm <- ncdf4::ncvar_get(nc, "lsm")
@@ -91,8 +135,11 @@ fix_lsm <- function(nc_path) {
   message("LSM fix: ", n, " near-land cells set to 1")
 }
 
+# Downloads ERA5 hourly climate data for the site bounding box and time window,
+# merges stepType files, fixes LSM, and processes to grid format for microclimf.
+# Skips download if merged file already exists (overwrite = FALSE).
 get_weather <- function(site, credentials, r, tme, dir, overwrite = FALSE) {
-  
+  message("")
   merged_file <- file.path(dir, paste0(site$Site, ".nc"))
   
   if (!file.exists(merged_file) || overwrite) {
@@ -106,8 +153,8 @@ get_weather <- function(site, credentials, r, tme, dir, overwrite = FALSE) {
     if (!all(existing) || overwrite) {
       message("Downloading ERA5 data for site ", site$Site, "...")
       req <- mcera5::build_era5_request(
-        xmin = site$lon_min, xmax = site$lon_max,
-        ymin = site$lat_min, ymax = site$lat_max,
+        xmin         = site$lon_min, xmax = site$lon_max,
+        ymin         = site$lat_min, ymax = site$lat_max,
         start_time   = site$tme_start, end_time = site$tme_end,
         by_month     = TRUE, outfile_name = site$Site
       )
@@ -144,7 +191,14 @@ get_weather <- function(site, credentials, r, tme, dir, overwrite = FALSE) {
   return(weatherdata)
 }
 
+
+# ── Terrain and landcover ─────────────────────────────────────────────────────
+
+# Downloads a digital elevation model for the site extent via elevatr.
+# Reprojects to EPSG:32717 (UTM 17S) for metric calculations, then back to
+# EPSG:4326 for use with microclimf. Caches as dtm.tif to avoid re-downloading.
 get_dtm <- function(r, dir, mask = FALSE) {
+  message("")
   cache_file <- file.path(dir, "dtm.tif")
   
   if (file.exists(cache_file)) {
@@ -159,14 +213,17 @@ get_dtm <- function(r, dir, mask = FALSE) {
   dtm <- microclimdata::dem_download(r = raster_utm, msk = mask)
   
   terra::writeRaster(dtm, cache_file)
-  message("DTM downloaded and cached: ", nrow(dtm), " x ", ncol(dtm), 
+  message("DTM downloaded and cached: ", nrow(dtm), " x ", ncol(dtm),
           " pixels at ", round(terra::res(dtm)[1], 1), "m resolution")
   return(dtm)
 }
 
+# Downloads ESA WorldCover 10m landcover via Google Earth Engine, exports to
+# Google Drive, and downloads to disk. Checks Drive first to avoid re-exporting.
+# Requires rgee initialisation before calling.
 get_landcover <- function(site, r, out_dir, type = "ESA",
                           overwrite = FALSE, google_drive_folder = "rgee_backup") {
-  
+  message("")
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   save_path    <- file.path(out_dir, paste0(site$Site, "_landcover_", type, ".tif"))
   drive_prefix <- paste0(site$Site, "_ESA_WorldCover")
@@ -196,7 +253,8 @@ get_landcover <- function(site, r, out_dir, type = "ESA",
     )
     task$start()
     rgee::ee_monitoring(task, max_attempts = 200, quiet = FALSE)
-    drive_file <- googledrive::drive_find(pattern = drive_prefix, n_max = 1)
+    drive_file <- googledrive::drive_ls(folder) |> 
+      dplyr::filter(grepl(drive_prefix, name))
   } else {
     message("Landcover found on Google Drive, downloading...")
   }
@@ -206,7 +264,14 @@ get_landcover <- function(site, r, out_dir, type = "ESA",
   return(terra::rast(save_path))
 }
 
+
+# ── Vegetation and soil parameters ────────────────────────────────────────────
+
+# Reclassifies ESA landcover to microclimdata habitat types, then builds
+# the full vegetation parameter object (canopy structure, LAI, reflectance)
+# needed by runpointmodela(). Aggregates to coarser resolution for speed.
 get_vegetation <- function(r, lcover, tme, lat, lon) {
+  message("")
   message("Reclassifying ESA landcover to habitat types...")
   rcl <- matrix(c(
     10,  2,  20,  6,  30, 10,  40, 13,  50, 14,
@@ -226,15 +291,18 @@ get_vegetation <- function(r, lcover, tme, lat, lon) {
   return(vegetation)
 }
 
+# Downloads MODIS LAI (500m) for the site extent and time period via NASA
+# Earthdata. Mosaics tiles, crops to template extent, and reprojects.
+# For higher resolution (10m HRVPP) set reso = 10 — requires WEkEO credentials.
 get_lai <- function(r, tme, reso = 500, pathout, credentials, template) {
-  
+  message("")
   dir.create(pathout, recursive = TRUE, showWarnings = FALSE)
   if (!reso %in% c(10, 500)) stop("reso must be one of 10 or 500")
   
   year <- tme$year[1] + 1900
   
   if (reso == 10) {
-    # ... HRVPP block unchanged ...
+    # HRVPP via WEkEO — placeholder, see legacy scripts for implementation
   } else {
     library(luna)
     if (tme[length(tme)] < as.POSIXlt("2000-02-18", tz = "UTC"))
@@ -273,14 +341,16 @@ get_lai <- function(r, tme, reso = 500, pathout, credentials, template) {
   message("Cropping and reprojecting LAI to template extent...")
   template_in_lai_crs <- terra::project(template, terra::crs(lai))
   lai <- terra::crop(lai, terra::ext(template_in_lai_crs))
-  message("")
   lai <- terra::project(lai, terra::crs(template))
   message("LAI ready: ", nlyr(lai), " layers")
   return(lai)
 }
 
+# Downloads and processes MODIS BRDF/albedo for the site.
+# Fills NA values with the spatial mean and resamples to template resolution.
+# Caches processed result as albedo_processed.rds to avoid re-downloading.
 get_albedo <- function(template, tme, pathout, credentials) {
-  
+  message("")
   dir.create(pathout, recursive = TRUE, showWarnings = FALSE)
   alb_cache <- file.path(pathout, "albedo_processed.rds")
   
@@ -311,15 +381,18 @@ get_albedo <- function(template, tme, pathout, credentials) {
   return(alb)
 }
 
-get_soil <- function(r, template, tme, credentials, landcover, dir, albedodir) {
-  
+# Builds the full soil/ground parameter object for microclimf:
+# downloads SoilGrids physical properties, derives soil type,
+# computes ground reflectance from LAI + albedo, and assembles
+# a soilcharac object. Caches to groundparams.rds.
+get_soil <- function(r, template, tme, credentials, landcover, dir, albedodir, laidir) {
+  message("")
   cache_file <- file.path(dir, "groundparams.rds")
   if (file.exists(cache_file)) {
     message("Soil cache found, loading...")
     return(readRDS(cache_file))
   }
   
-  # 1. Download soil physical properties
   message("[1/5] Downloading soil data from SoilGrids...")
   soil_r <- r
   terra::values(soil_r) <- 1
@@ -327,43 +400,32 @@ get_soil <- function(r, template, tme, credentials, landcover, dir, albedodir) {
                                                      deletefiles = FALSE)
   message("Soil properties downloaded: ", paste(names(soilproperties), collapse = ", "))
   
-  # 2. Get soil type
   message("[2/5] Deriving soil type...")
   soiltype <- microclimdata:::soildata_gettype(soilproperties)
   message("Soil type range: ", min(terra::values(soiltype), na.rm = TRUE),
           " - ", max(terra::values(soiltype), na.rm = TRUE))
   
-  # 3. Get LAI
   message("[3/5] Getting LAI...")
-  lai <- get_lai(r = r, tme = tme, pathout = LAI_DIR,
+  lai <- get_lai(r = r, tme = tme, pathout = laidir,
                  credentials = credentials, template = template)
   
-  # 4. Get x (leaf inclination) and albedo
   message("[4/5] Getting leaf inclination coefficient and albedo...")
   x   <- x_calc(landcover = landcover, lctype = "ESA")
   alb <- get_albedo(template = template, tme = tme,
                     pathout = albedodir, credentials = credentials)
   
-  # 5. Get ground reflectance
   message("[5/5] Computing ground reflectance...")
+  # Reduce to single layer and aggregate to coarser resolution to save memory
+  alb_coarse <- terra::aggregate(mean(alb, na.rm = TRUE), fact = 10, fun = "mean")
+  lai_coarse <- terra::aggregate(mean(lai, na.rm = TRUE), fact = 10, fun = "mean")
+  x_coarse   <- terra::aggregate(x,                       fact = 10, fun = "mean")
   
-  # Reduce to single layer (take mean across time if multi-layer)
-  alb_single <- mean(alb, na.rm = TRUE)
-  lai_single <- mean(lai, na.rm = TRUE)
-  
-  # Aggregate to coarser resolution to save memory
-  alb_coarse <- terra::aggregate(alb_single, fact = 10, fun = "mean")
-  lai_coarse <- terra::aggregate(lai_single, fact = 10, fun = "mean")
-  x_coarse   <- terra::aggregate(x,         fact = 10, fun = "mean")
-  
-  # Resample all to same extent
   alb_coarse <- terra::resample(alb_coarse, x_coarse)
   lai_coarse <- terra::resample(lai_coarse, x_coarse)
   
   groundr <- reflectance_calc(alb = alb_coarse, lai = lai_coarse,
                               x = x_coarse, plotprogress = FALSE)$gref
   
-  # Build soilcharac object
   message("Building soilcharac object...")
   soilc <- list(
     soiltype = terra::wrap(terra::resample(soiltype, template, method = "near")),
@@ -375,4 +437,3 @@ get_soil <- function(r, template, tme, credentials, landcover, dir, albedodir) {
   message("Soil parameters ready and cached.")
   return(soilc)
 }
-

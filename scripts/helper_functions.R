@@ -20,6 +20,8 @@ COMBINED_COL_TYPES <- cols(
   Genus          = col_character(),
   species        = col_character()
 )
+# Custom colour palette for visualisation (blue → pink → yellow → warm)
+pink_viridis <- colorRampPalette(c("#3777FF", "#FFB5C2", "#FFE9CE", "#FFE156", "#FFBE86"))
 # -----------------------------------------------------------------------------
 # normalize_dms()
 # Standardises degree-minute-second (DMS) coordinate strings by replacing
@@ -464,4 +466,41 @@ create_vegpoint_fixed <- function(landcover, vhgt, lai, refldata,
   
   class(vegpp) <- "vegparams"
   return(vegpp)
+}
+# ── Data conversion ───────────────────────────────────────────────────────────
+
+# Runs the two-step Python conversion pipeline for a single field site:
+#   Step 1 — geojson-to-csv.py       : GeoJSON export → raw flat CSV
+#   Step 2 — convert_observations.py : raw CSV → standardised EpiphytesDatabase format
+# Call this once per site before combining CSVs into combinedv3.csv.
+# Output is written to data/csv/Processed{site_name}.csv
+run_conversion <- function(site_name,
+                           geojson_path,
+                           geojson_to_csv_script = "scripts/geojson-csv-sql-conversion-tools/python/geojson-to-csv.py",
+                           convert_obs_script    = "scripts/config_processing/convert_observations.py",
+                           csv_dir               = "geojson_to_csv/csv",
+                           output_dir            = "data/csv") {
+  
+  raw_csv <- file.path(csv_dir,    paste0(site_name, ".csv"))
+  out_csv <- file.path(output_dir, paste0("Processed", site_name, ".csv"))
+  
+  # Step 1: GeoJSON → raw CSV
+  message("  [1/2] GeoJSON → CSV : ", basename(geojson_path))
+  system2("python", args = c(
+    geojson_to_csv_script,
+    "--input",  geojson_path,
+    "--output", raw_csv
+  ))
+  
+  # Step 2: raw CSV → EpiphytesDatabase format
+  message("  [2/2] Formatting    : ", basename(raw_csv))
+  system2("python", args = c(
+    convert_obs_script,
+    "--input",  raw_csv,
+    "--output", out_csv,
+    "--site",   shQuote(site_name)
+  ))
+  
+  message("  Done: ", out_csv)
+  return(out_csv)
 }

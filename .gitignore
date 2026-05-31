@@ -21,6 +21,7 @@ credentials.rds
 
 # --- macOS system files ---
 *.DS_Store
+**/.DS_Store
 
 # --- Keep folder structure ---
 !data/raw/.gitkeep
@@ -28,3 +29,15 @@ credentials.rds
 !output/.gitkeep
 !figures/.gitkeep
 .positai
+
+# --- Sync artifacts ---
+.sync_*.db
+.sync_*.db
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- Not mine ---
+geojson-csv-sql-conversion-tools
+
