@@ -13,7 +13,7 @@
 prepare_observations <- function(csv_path, models) {
   # get modelled heights — strip site prefix e.g. "Mashpi_h5.0" -> 5.0
   modelled_heights <- as.numeric(sub(".*_h", "", names(models)))
-
+  
   # build per-site cell coordinate lookup from valid cells in models
   # each site has different valid cell indices and coordinates
   site_cell_coords <- list()
@@ -35,13 +35,13 @@ prepare_observations <- function(csv_path, models) {
   snap_to_nearest <- function(h, available) {
     available[which.min(abs(available - h))]
   }
-
+  
   # find nearest ERA5 cell for a given observation using site-specific coords
   nearest_cell <- function(obs_lat, obs_lon, cells) {
     dists <- sqrt((cells$lat - obs_lat)^2 + (cells$lon - obs_lon)^2)
     cells$cell[which.min(dists)]
   }
-
+  
   obs <- read_csv(csv_path, col_types = COMBINED_COL_TYPES) |>
     filter(!is.na(Height_m), !is.na(Genus)) |>
     mutate(
@@ -56,7 +56,7 @@ prepare_observations <- function(csv_path, models) {
       Genus, species, FinalID, Height_m, hSnapped, hKey,
       CanopyHeight_m, lat, lon, Area_or_Site, datetime, nearest_cell
     )
-
+  
   log_msg(sprintf(
     "Observations prepared: %d rows, %d unique heights, %d sites",
     nrow(obs), length(unique(obs$hKey)), length(unique(obs$Area_or_Site))
@@ -76,11 +76,11 @@ prepare_observations <- function(csv_path, models) {
 # nighttime = dew formation, radiative cooling, cold stress
 extract_niches <- function(obs, models, valid_per_model) {
   niches <- data.frame()
-
+  
   for (i in 1:nrow(obs)) {
     h <- obs$hKey[i]
     c <- obs$nearest_cell[i]
-
+    
     # retrieve hourly weather for this observation's height and ERA5 cell
     # use the correct valid cells for this specific model key
     valid_cells_for_h <- valid_per_model[[h]]
@@ -89,7 +89,7 @@ extract_niches <- function(obs, models, valid_per_model) {
     weather$is_day <- weather$swdown > 0 # day = any incoming solar radiation
     day <- weather[weather$is_day, ]
     night <- weather[!weather$is_day, ]
-
+    
     # build one-row summary of day and night microclimate conditions
     # as.numeric() used defensively in case of unexpected type coercion
     avgs <- data.frame(
@@ -129,7 +129,7 @@ extract_niches <- function(obs, models, valid_per_model) {
     )
     niches <- rbind(niches, avgs)
   }
-
+  
   log_msg(sprintf(
     "Niche extraction complete: %d observations, %d unique species",
     nrow(niches), length(unique(niches$FinalID))
@@ -174,19 +174,19 @@ get_canopy_grid <- function(site, xDim, yDim, resolution, out_dir,
     message("Canopy grid cache found, loading...")
     return(readRDS(cache_file))
   }
-
+  
   message("Downloading canopy height raster from GEE...")
   e <- c(site$lon_min, site$lat_min, site$lon_max, site$lat_max)
   aoi <- ee$Geometry$Rectangle(e)
   img <- ee$Image("users/nlang/ETH_GlobalCanopyHeight_2020_10m_v1")$
     select("b1")$clip(aoi)
-
+  
   # Check Drive first — skip export if already there
   googledrive::drive_auth(email = "lizethestevezt@gmail.com")
   folder <- googledrive::drive_find(pattern = google_drive_folder, type = "folder", n_max = 1)
   drive_files <- googledrive::drive_ls(folder)
   drive_file <- drive_files[grepl("canopy_height", drive_files$name), ]
-
+  
   if (nrow(drive_file) == 0) {
     message("Exporting canopy height to Drive...")
     task <- ee$batch$Export$image$toDrive(
@@ -205,11 +205,11 @@ get_canopy_grid <- function(site, xDim, yDim, resolution, out_dir,
   } else {
     message("Canopy height found on Drive, downloading...")
   }
-
+  
   tmp_path <- tempfile(fileext = ".tif")
   googledrive::drive_download(file = drive_file[1, ], path = tmp_path, overwrite = TRUE)
   canopy_rast <- terra::rast(tmp_path)
-
+  
   target_rast <- terra::rast(
     nrows = yDim, ncols = xDim,
     xmin = site$lon_min, xmax = site$lon_max,
@@ -217,10 +217,10 @@ get_canopy_grid <- function(site, xDim, yDim, resolution, out_dir,
     crs = "EPSG:4326"
   )
   canopy_rast <- terra::resample(canopy_rast, target_rast, method = "bilinear")
-
+  
   canopy_mat <- t(as.matrix(canopy_rast, wide = TRUE))
   canopy_mat[is.na(canopy_mat)] <- median(canopy_mat, na.rm = TRUE)
-
+  
   saveRDS(canopy_mat, cache_file)
   message(
     "Canopy grid saved: ", xDim, " × ", yDim, " cells, range ",

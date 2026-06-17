@@ -7,6 +7,7 @@ library(readr)
 library(rgee)
 library(rgl)
 library(plotly)
+library(ggplot2)
 source("scripts/helper_functions.R")
 source("scripts/get_climateinputs.R")
 source("scripts/get_microenv.R")
@@ -217,6 +218,48 @@ plot_3d_abundance(
   result
 )
 
-plot_total_abundance(result, t = 40)
+plot_abundance(result, t = 40)
 
-# ── STEP 4: Analysis + figures ───────────────────────────────────────────────
+# ── STEP 4a: Microclimate overview across canopy heights ─────────────────────
+clim_summary <- lapply(names(models), function(key) {
+  h    <- as.numeric(sub(".*_h", "", key))
+  site_name <- sub("_h.*", "", key)
+  valid <- prep$valid_per_model[[key]]
+  if (length(valid) == 0) return(NULL)
+  cell_means <- lapply(valid, function(cell_idx) {
+    w <- models[[key]][[cell_idx]]$weather
+    data.frame(
+      temp_mean   = mean(w$temp,                    na.rm = TRUE),
+      relhum_mean = mean(w$relhum,                  na.rm = TRUE),
+      swdown_mean = mean(w$swdown[w$swdown > 0],    na.rm = TRUE)
+    )
+  }) |> dplyr::bind_rows()
+  data.frame(
+    site        = site_name,
+    height      = h,
+    temp_mean   = mean(cell_means$temp_mean,   na.rm = TRUE),
+    relhum_mean = mean(cell_means$relhum_mean, na.rm = TRUE),
+    swdown_mean = mean(cell_means$swdown_mean, na.rm = TRUE)
+  )
+}) |> dplyr::bind_rows()
+
+ggplot(clim_summary, aes(x = height, y = temp_mean, color = site)) +
+  geom_line() + geom_point(size = 1.5) +
+  labs(title = "Mean temperature by canopy height", x = "Height (m)", y = "Temp (°C)")
+
+ggplot(clim_summary, aes(x = height, y = relhum_mean, color = site)) +
+  geom_line() + geom_point(size = 1.5) +
+  labs(title = "Mean relative humidity by canopy height", x = "Height (m)", y = "RelHum (%)")
+# ── STEP 4b: Niche por banda elevacional ──────────────────────────────────────
+# Necesitas añadir elevación a tus observaciones
+# (puedes sacarla del DTM o de los metadatos del CSV si tienes columna de elevación)
+# Luego:
+niches_bands <- niches |>
+  mutate(elev_band = cut(elevation_m, breaks = seq(0, 3000, by = 500))) |>
+  group_by(elev_band) |>
+  summarise(across(c(day_temp_mean, day_relhum_mean, day_swdown_mean), 
+                   list(mean = mean, sd = sd), na.rm = TRUE))
+
+# ── STEP 4c: Comparar banda más baja vs más alta ──────────────────────────────
+lowest_band  <- niches_bands |> slice_min(elev_band, n = 1)
+highest_band <- niches_bands |> slice_max(elev_band, n = 1)
