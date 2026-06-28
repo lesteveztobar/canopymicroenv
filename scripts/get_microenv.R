@@ -182,7 +182,7 @@ get_canopy_grid <- function(site, xDim, yDim, resolution, out_dir,
     select("b1")$clip(aoi)
   
   # Check Drive first — skip export if already there
-  googledrive::drive_auth(email = "lizethestevezt@gmail.com")
+  googledrive::drive_auth(email = "lizethestevezt@gmail.com", cache = "~/.secrets")
   folder <- googledrive::drive_find(pattern = google_drive_folder, type = "folder", n_max = 1)
   drive_files <- googledrive::drive_ls(folder)
   drive_file <- drive_files[grepl("canopy_height", drive_files$name), ]

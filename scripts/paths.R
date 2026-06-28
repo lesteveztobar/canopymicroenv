@@ -6,7 +6,7 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 
-BASE_DIR      <- "/Users/lizethestevezt/canopymicroenv"
+BASE_DIR <- "/home/s38leste_hpc/canopymicroenv"
 
 # data
 RAW_DIR       <- file.path(BASE_DIR, "data", "raw")

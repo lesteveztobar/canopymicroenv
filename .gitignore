@@ -15,6 +15,7 @@ figures/*
 # --- Logs and temporary files ---
 *.log
 *.tmp
+logs/*.out
 
 # --- Credentials file ---
 credentials.rds
@@ -32,7 +33,6 @@ credentials.rds
 
 # --- Sync artifacts ---
 .sync_*.db
-.sync_*.db
 
 # --- Python ---
 __pycache__/
@@ -41,3 +41,6 @@ __pycache__/
 # --- Not mine ---
 geojson-csv-sql-conversion-tools
 
+# --- Simple model files ---
+scripts/simple_experiments.R
+scripts/simple_colonization.R

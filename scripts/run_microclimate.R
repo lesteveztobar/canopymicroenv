@@ -1,4 +1,4 @@
-# runmicroenv.R
+# run_microclimate.R
 # Data acquisition and microclimate modelling for canopy microenvironment characterisation.
 # For each site: downloads ERA5, DTM, landcover, LAI, albedo, and soil data;
 # builds vegparams and soilcharac; runs the point model and then the grid model
@@ -20,7 +20,9 @@ library(luna)
 
 
 # Python environment for rgee / Earth Engine
-reticulate::use_python("/Users/lizethestevezt/miniforge3/bin/python", required = TRUE)
+PYTHON_PATH <- Sys.getenv("CANOPY_PYTHON",
+  unset = "/home/s38leste_hpc/.conda/envs/canopy_rgee/lib/python3.12")
+reticulate::use_python(PYTHON_PATH, required = TRUE)
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 source("scripts/get_microenv.R")
@@ -28,18 +30,18 @@ source("scripts/get_climateinputs.R")
 source("scripts/paths.R")
 source("scripts/helper_functions.R")
 
-mycredentials <- readRDS("/Users/lizethestevezt/canopymicroenv/credentials.rds")
+mycredentials <- readRDS(file.path("/home/s38leste_hpc/canopymicroenv/credentials.rds"))
 
 # Build per-site table — one row per field site with bounding box,
 # time window, and observed height range derived from the combined CSV.
-sites <- make_sites("data/csv/combinedv3.csv", pad = 0.15)
+sites <- make_sites(file.path(CSV_DIR, "combinedv3.csv"), pad = 0.15)
 
 # Important: Run these ONE BY ONE before running the loop —
 # they require authentication and a code to paste into the console.
 ee$Authenticate()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-dir.create("/Users/lizethestevezt/canopymicroenv/logs", recursive = TRUE, showWarnings = FALSE)
+dir.create(LOGS_DIR, recursive = TRUE, showWarnings = FALSE)
 log_file <- file.path(LOGS_DIR, sprintf("runmicroenv_%s.log", format(Sys.time(), "%Y%m%d_%H%M%S")))
 log_msg <- function(msg) {
   stamped <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
@@ -76,7 +78,6 @@ for (site in split(sites, seq_len(nrow(sites)))) {
 
   if (file.exists(site_env_path)) {
     log_msg(sprintf("Microenv already exists for %s, skipping.", site$Site))
-    microenv[[site$Site]] <- readRDS(site_env_path)
     next
   }
 
@@ -207,8 +208,9 @@ for (site in split(sites, seq_len(nrow(sites)))) {
   micropoint_mx <- microclimf::subsetpointmodela(models[[site$Site]], tstep = "month", what = "tmax")
   micropoint_mn <- microclimf::subsetpointmodela(models[[site$Site]], tstep = "month", what = "tmin")
 
-  heights        <- seq(site$hObs_min, site$hObs_max, by = 0.1)
-  site_height_envs <- list()
+  heights        <- seq(0.1, site$hObs_max, by = 0.1)
+  height_dir     <- file.path(PROCESSED_DIR, sprintf("microenv_%s_heights", site$Site))
+  dir.create(height_dir, recursive = TRUE, showWarnings = FALSE)
 
   # dtmc must match the ERA5 grid exactly (same cells as micropointa).
   # weatherdata[[1]] is a PackedSpatRaster — unwrap one layer to get the template.
@@ -217,17 +219,48 @@ for (site in split(sites, seq_len(nrow(sites)))) {
   era5_template <- terra::rast(weatherdata[[1]])[[1]]
   dtmc <- terra::resample(dtmdata, era5_template, method = "bilinear")
 
-  for (h in heights) {
-    h_key <- sprintf("h%.2f", h)
-    log_msg(sprintf("  Running grid model at %.2f m...", h))
+  # Save each height to its own small file as it is computed so that:
+  #   (a) memory never accumulates across heights, and
+  #   (b) a killed run can resume from where it left off.
+  # terra SpatRasters are not fork-safe — wrap before forking, unwrap inside.
+  dtmdata_w  <- terra::wrap(dtmdata)
+  dtmc_w     <- terra::wrap(dtmc)
+
+  n_cores    <- max(1L, parallel::detectCores() - 1L)
+  n_heights  <- length(heights)
+  log_msg(sprintf("  Launching parallel height loop: %d heights on %d cores...",
+                  n_heights, n_cores))
+
+  # Workers can't call the parent log_msg — capture log_file in closure and
+  # write directly. flock-style append is safe across forked processes on macOS.
+  .log_file <- log_file
+  .wlog <- function(msg) {
+    stamped <- paste0("[", format(Sys.time(), "%H:%M:%S"), "][worker] ", msg)
+    cat(stamped, "\n", file = .log_file, append = TRUE)
+  }
+
+  parallel::mclapply(seq_along(heights), function(i) {
+    h          <- heights[i]
+    h_key      <- sprintf("h%.2f", h)
+    h_rds_path <- file.path(height_dir, sprintf("%s.rds", h_key))
+
+    if (file.exists(h_rds_path)) {
+      .wlog(sprintf("[%d/%d] %.2f m — already done, skipping.", i, n_heights, h))
+      return(invisible(NULL))
+    }
+
+    .wlog(sprintf("[%d/%d] %.2f m — starting runmicro...", i, n_heights, h))
+
+    dtm_  <- terra::unwrap(dtmdata_w)
+    dtmc_ <- terra::unwrap(dtmc_w)
 
     mout_mx <- microclimf::runmicro(
       micropoint = micropoint_mx,
       reqhgt     = h,
       vegp       = vegetationdata,
       soilc      = soildata,
-      dtm        = dtmdata,
-      dtmc       = dtmc,
+      dtm        = dtm_,
+      dtmc       = dtmc_,
       altcorrect = 1,
       method     = "R"
     )
@@ -236,38 +269,69 @@ for (site in split(sites, seq_len(nrow(sites)))) {
       reqhgt     = h,
       vegp       = vegetationdata,
       soilc      = soildata,
-      dtm        = dtmdata,
-      dtmc       = dtmc,
+      dtm        = dtm_,
+      dtmc       = dtmc_,
       altcorrect = 1,
       method     = "R"
     )
 
-    site_height_envs[[h_key]] <- list(tmax = mout_mx, tmin = mout_mn)
-    log_msg(sprintf("  Tz range at %.2fm — max day: [%.1f, %.1f] | min day: [%.1f, %.1f]",
-      h,
-      min(mout_mx$Tz, na.rm = TRUE), max(mout_mx$Tz, na.rm = TRUE),
-      min(mout_mn$Tz, na.rm = TRUE), max(mout_mn$Tz, na.rm = TRUE)))
+    saveRDS(list(tmax = mout_mx, tmin = mout_mn), h_rds_path)
+    .wlog(sprintf("[%d/%d] %.2f m — done. Tz max: [%.1f, %.1f] | min: [%.1f, %.1f]",
+                  i, n_heights, h,
+                  min(mout_mx$Tz, na.rm = TRUE), max(mout_mx$Tz, na.rm = TRUE),
+                  min(mout_mn$Tz, na.rm = TRUE), max(mout_mn$Tz, na.rm = TRUE)))
+    invisible(NULL)
+  }, mc.cores = n_cores)
+
+  # Report how many heights actually completed
+  n_done <- sum(file.exists(file.path(height_dir, sprintf("h%.2f.rds", heights))))
+  log_msg(sprintf("  Parallel height loop done: %d/%d heights complete.", n_done, n_heights))
+
+  # All heights done — assemble the final list and write the combined RDS.
+  log_msg("  All heights complete. Assembling combined microenv RDS...")
+  site_height_envs <- list()
+  for (h in heights) {
+    h_key <- sprintf("h%.2f", h)
+    site_height_envs[[h_key]] <- readRDS(file.path(height_dir, sprintf("%s.rds", h_key)))
   }
 
-  # Attach spatial reference so downstream scripts can recover lon/lat axes
-  # without needing to re-load the dtm. terra::ext() and crs() are plain R
-  # objects (not external pointers) so they survive RDS round-trips safely.
+  # Attach spatial reference so downstream scripts can recover lon/lat axes.
   site_height_envs$.spatial <- list(
     ext = terra::ext(dtmdata),
     crs = terra::crs(dtmdata)
   )
 
+  # Attach the ERA5 weather time series from the first valid point model cell.
+  # This gives the colonization model access to precip, winddir, and all other
+  # macro-climate variables that runmicro() doesn't output spatially.
+  # Cell 1 is representative — macro variables (precip, wind direction) have
+  # negligible within-site variation at ERA5 resolution (~9km grid).
+  site_height_envs$.weather <- models[[site$Site]][[1]]$weather
+
   microenv[[site$Site]] <- site_height_envs
 
   saveRDS(site_height_envs, site_env_path)
-  log_msg(sprintf("Saved multi-height microenvironment to %s", site_env_path))
+  log_msg(sprintf("Saved combined microenvironment to %s", site_env_path))
+
+  # Clean up per-height files now that the combined RDS is safely written.
+  unlink(height_dir, recursive = TRUE)
+  log_msg("  Per-height cache cleaned up.")
 }
 
 # ── 4. Save collated outputs ──────────────────────────────────────────────────
 log_msg(sprintf("Saving %d site point models to master file...", length(models)))
 saveRDS(models, file.path(PROCESSED_DIR, "pointmodel.rds"))
 
-log_msg(sprintf("Saving %d site microenvironments to master file...", length(microenv)))
-saveRDS(microenv, file.path(PROCESSED_DIR, "microenv.rds"))
+# Collect all per-site microenvs from disk (includes sites skipped this run).
+all_site_envs <- lapply(
+  setNames(sites$Site, sites$Site),
+  function(s) {
+    p <- file.path(PROCESSED_DIR, sprintf("microenv_%s.rds", s))
+    if (file.exists(p)) readRDS(p) else NULL
+  }
+)
+all_site_envs <- Filter(Negate(is.null), all_site_envs)
+log_msg(sprintf("Saving %d site microenvironments to master file...", length(all_site_envs)))
+saveRDS(all_site_envs, file.path(PROCESSED_DIR, "microenv.rds"))
 
 log_msg("runmicroenv.R complete")

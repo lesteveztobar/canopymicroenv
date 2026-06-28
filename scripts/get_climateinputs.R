@@ -247,7 +247,7 @@ get_landcover <- function(site, r, out_dir, type = "ESA",
   }
 
   message("Checking Google Drive for landcover...")
-  googledrive::drive_auth(email = "lizethestevezt@gmail.com")
+  googledrive::drive_auth(email = "lizethestevezt@gmail.com", cache = "~/.secrets")
   folder      <- googledrive::drive_find(pattern = google_drive_folder, type = "folder", n_max = 1)
   drive_files <- googledrive::drive_ls(folder)
   drive_file  <- drive_files[grepl(drive_prefix, drive_files$name), ]
@@ -401,7 +401,7 @@ get_vegetation <- function(r, lcover, lai, refldata, dir, site_name) {
   drive_prefix <- paste0("canopy_height_", site_name)
 
   if (!file.exists(vhgt_file)) {
-    googledrive::drive_auth(email = "lizethestevezt@gmail.com")
+    googledrive::drive_auth(email = "lizethestevezt@gmail.com", cache = "~/.secrets")
     folder      <- googledrive::drive_find(pattern = "rgee_backup", type = "folder", n_max = 1)
     drive_files <- googledrive::drive_ls(folder)
     drive_file  <- drive_files[grepl(drive_prefix, drive_files$name), ]
@@ -412,7 +412,7 @@ get_vegetation <- function(r, lcover, lai, refldata, dir, site_name) {
       .orig_vhgt <- get("vegheight_download", envir = getNamespace("microclimdata"))
       assignInNamespace("vegheight_download",
         function(r, GoogleDrivefolder, pathtopython, projectname = NA, silent = FALSE) {
-          reticulate::use_python(paste0(pathtopython, "python"), required = TRUE)
+          reticulate::use_python(pathtopython, required = TRUE)
           if (!is.na(projectname)) rgee::ee$Initialize(project = projectname)
           e  <- terra::ext(r)
           r2 <- terra::rast(e); terra::crs(r2) <- terra::crs(r)
@@ -439,7 +439,8 @@ get_vegetation <- function(r, lcover, lai, refldata, dir, site_name) {
       microclimdata::vegheight_download(
         r                 = r,
         GoogleDrivefolder = "rgee_backup",
-        pathtopython      = "/Users/lizethestevezt/miniforge3/bin/",
+        pathtopython      = Sys.getenv("CANOPY_PYTHON",
+                              unset = "/home/s38leste_hpc/.conda/envs/canopy_rgee/bin/python3.12"),
         projectname       = "ee-lizethestevezt"
       )
       # re-check Drive after export

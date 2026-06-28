@@ -8,6 +8,66 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Core equation primitives ──────────────────────────────────────────────────
+# Each named after the quantity it computes. Used inside the IPM vital rate
+# functions below. Extracting them makes the biology explicit and testable.
+
+# Logistic survival probability for one stage given size and monthly climate.
+# logit(s) = β₀_stage + β₁·z + climate_penalties
+#
+# Light effect on S and J (Izuddin et al. 2018; Zotz 1998):
+#   swdown_rel = local swdown / site-mean swdown (computed in run_pass3).
+#   Seedlings benefit from increasing light up to site mean (mycorrhizal fungi
+#   require some radiation; deep shade reduces germination success).
+#   Above 1.5× site mean, desiccation stress reduces seedling survival.
+#   Juveniles experience the same light dependence at half the magnitude.
+#   Adults are physiologically buffered and retain only the heat-stress term.
+# Form:
+#   light_S = beta_light_S * min(swdown_rel, 1) - beta_stress_S * max(0, swdown_rel - 1.5)
+#   light_J = 0.5 * light_S
+# Other penalties:
+#   Seedlings: RH-dependent (Zotz 1998 — "most deaths during dry season")
+#   Adults:    temperature-dependent — heat stress above 23°C (Olaya-Arenas 2011)
+# Sources: Zotz (1998), Izuddin et al. (2018), Olaya-Arenas et al. (2011),
+#          Mondragón et al. (2007), Winkler et al. (2009), Zotz & Schmidt (2006)
+survival_logit <- function(stage, z, temp, relhum, swdown_rel,
+                           beta0S, beta0J, beta0A, beta1,
+                           beta_light_S  = 0.30,   # light benefit for seedlings
+                           beta_stress_S = 0.20) { # desiccation penalty above 1.5x mean
+  light_S <- beta_light_S  * min(swdown_rel, 1.0) -
+             beta_stress_S * max(0, swdown_rel - 1.5)
+  eta <- switch(stage,
+    S = beta0S + beta1 * z - (100 - relhum) / 100 + light_S,
+    J = beta0J + beta1 * z + 0.5 * light_S,
+    A = beta0A + beta1 * z - max(0, (temp - 23) * 0.05),
+    stop("survival_logit: stage must be 'S', 'J', or 'A'"))
+  return(1 / (1 + exp(-eta)))
+}
+
+# Logistic stage-transition probability given annual precipitation and RH.
+# logit(p) = ψ₀_stage + β_precip·P + β_rh·RH
+# Sources: Zotz & Schmidt (2006), Mondragón et al. (2009), Izuddin et al. (2018)
+transition_logit <- function(psi0, precip_annual_mm, relhum_mean,
+                             beta_precip, beta_rh) {
+  return(1 / (1 + exp(-(psi0 + beta_precip * precip_annual_mm +
+                         beta_rh * relhum_mean))))
+}
+
+# Annual pseudobulb size increment for adults, climate-scaled and with
+# optional cost-of-reproduction penalty.
+# Δz = delta_z_base × (P/P_ref) × (RH/RH_ref) + ε  [ε ~ N(0, σ/2)]
+# If fruited: Δz × cost_repro (Zotz 1998 — "reduced growth after fruiting")
+size_increment <- function(z_A, precip_annual, relhum_mean,
+                           delta_z_base, precip_ref, rh_ref, sigma,
+                           cost_repro, fruited, z_A_min, z_A_max) {
+  delta_z <- delta_z_base *
+    (precip_annual / precip_ref) *
+    (relhum_mean   / rh_ref) +
+    rnorm(1, 0, sigma * 0.5)
+  if (fruited) delta_z <- delta_z * cost_repro
+  return(pmin(z_A_max, pmax(z_A_min, z_A + delta_z)))
+}
+
 # ── Vital rate functions ──────────────────────────────────────────────────────
 # Named following IPM notation: s(z,e), g(z'|z,e), p_r(z), f_s(z), p_est(e)
 # z  = pseudobulb length (cm) — state variable
@@ -27,7 +87,7 @@
 #   Adults:    temperature-dependent — heat stress above 23°C (Olaya-Arenas 2011)
 # Sources: Zotz (1998), Olaya-Arenas et al. (2011), Izuddin et al. (2018),
 #          Mondragón et al. (2007), Winkler et al. (2009), Zotz & Schmidt (2006)
-survive <- function(N, stage, clim_month,
+survive <- function(N, stage, clim_month, mean_swdown_site,
                     beta0S = -0.24,   # logit intercept for S → annual s ≈ 0.44
                     beta0J =  0.41,   # logit intercept for J → annual s ≈ 0.60
                     beta0A =  1.73,   # logit intercept for A → annual s ≈ 0.85
@@ -37,20 +97,17 @@ survive <- function(N, stage, clim_month,
                     z_A_min = 7,  z_A_max = 20,  # cm — adult size range (min ~7cm: Zotz 2006)
                     stochastic = FALSE) {
   if (is.na(N) || N == 0) return(0L)
-  temp   <- mean(clim_month$temp,   na.rm = TRUE)
-  relhum <- mean(clim_month$relhum, na.rm = TRUE)
+  temp        <- mean(clim_month$temp,   na.rm = TRUE)
+  relhum      <- mean(clim_month$relhum, na.rm = TRUE)
+  swdown_mean <- mean(clim_month$swdown[clim_month$swdown > 0], na.rm = TRUE)
+  swdown_rel  <- if (!is.na(swdown_mean) && mean_swdown_site > 0)
+                   swdown_mean / mean_swdown_site else 1.0
   z <- switch(stage,
     S = runif(1, z_S_min, z_S_max),
     J = runif(1, z_J_min, z_J_max),
     A = runif(1, z_A_min, z_A_max))
-  s <- switch(stage,
-    # seedlings: humidity loss is the primary mortality driver (Zotz 1998)
-    S = 1 / (1 + exp(-(beta0S + beta1 * z - (100 - relhum) / 100))),
-    # juveniles: size-dependent, no strong climate signal in literature for this stage
-    J = 1 / (1 + exp(-(beta0J + beta1 * z))),
-    # adults: heat stress above 23°C (Olaya-Arenas et al. 2011 — 1-yr lag effect)
-    A = 1 / (1 + exp(-(beta0A + beta1 * z - max(0, (temp - 23) * 0.05)))))
-  if (stochastic) rbinom(1, N, s) else round(N * s)
+  s <- survival_logit(stage, z, temp, relhum, swdown_rel, beta0S, beta0J, beta0A, beta1)
+  return(if (stochastic) rbinom(1, N, s) else round(N * s))
 }
 
 # ── g(z'|z, e): Growth / stage transition probability ─────────────────────────
@@ -72,7 +129,7 @@ growth_prob <- function(stage, precip_annual_mm, relhum_mean,
   psi0 <- switch(stage,
     S = psi0S, J = psi0J,
     stop("growth_prob: stage must be 'S' or 'J'"))
-  1 / (1 + exp(-(psi0 + beta_precip * precip_annual_mm + beta_rh * relhum_mean)))
+  return(transition_logit(psi0, precip_annual_mm, relhum_mean, beta_precip, beta_rh))
 }
 
 # ── g(z'|z, e) applied: Advance individuals and update adult size ──────────────
@@ -103,7 +160,9 @@ grow <- function(nS, nJ, nA, z_A, clim_year, fruited = FALSE,
   nA  <- if (is.na(nA))  0L   else nA
   z_A <- if (is.na(z_A) || z_A < z_A_min) z_A_min else z_A
 
-  precip_annual <- sum(clim_year$precip, na.rm = TRUE)
+  # clim_year has 48 rows (representative warm + cold hours across the year).
+  # precip is the mean hourly ERA5 value; scale to annual by × 8760 hours.
+  precip_annual <- mean(clim_year$precip, na.rm = TRUE) * 8760
   relhum_mean   <- mean(clim_year$relhum, na.rm = TRUE)
 
   p_StoJ <- growth_prob("S", precip_annual, relhum_mean, psi0S, psi0J, beta_precip, beta_rh)
@@ -116,11 +175,9 @@ grow <- function(nS, nJ, nA, z_A, clim_year, fruited = FALSE,
   n_StoJ <- rbinom(1, nS, p_StoJ)
   n_JtoA <- rbinom(1, nJ, p_JtoA)
 
-  # adult size increment — climate-scaled, penalised if fruited this year
-  delta_z <- delta_z_base * (precip_annual / precip_ref) * (relhum_mean / rh_ref) +
-             rnorm(1, 0, sigma * 0.5)
-  if (fruited) delta_z <- delta_z * cost_repro
-  z_A_new <- pmin(z_A_max, pmax(z_A_min, z_A + delta_z))
+  z_A_new <- size_increment(z_A, precip_annual, relhum_mean,
+                            delta_z_base, precip_ref, rh_ref, sigma,
+                            cost_repro, fruited, z_A_min, z_A_max)
 
   list(nS  = nS - n_StoJ,
        nJ  = nJ + n_StoJ - n_JtoA,
@@ -207,20 +264,20 @@ establish <- function(new_seeds, clim, mean_swdown_site,
 # The canopy attenuation coefficient a = 23(1 - difrac) is derived from the
 # fraction of diffuse radiation (difrac), calibrated by microclimf.
 # Sources: Winkler et al. (2009), McCormick & Jacquemyn (2014)
+# Draw all indN seeds at once — vectorized over seeds, no per-seed loop.
 .ind_disperse <- function(x, y, z, indN, winddir, meanDisp, Disp, pad,
                           maxDispZ = 5) {
   wind_rad <- (winddir + 180) %% 360 * pi / 180
-  for (ind in 1:indN) {
-    dist  <- round(min(rexp(1, rate = 1 / max(meanDisp, 0.1)), pad))
-    angle <- wind_rad + runif(1, -pi / 4, pi / 4)
-    dx    <- round(dist * sin(angle))
-    dy    <- round(dist * cos(angle))
-    dz    <- sample(-maxDispZ:maxDispZ, size = 1)
-    tx <- x + dx + pad; ty <- y + dy + pad; tz <- z + dz + pad
-    if (tx >= 1 && tx <= dim(Disp)[1] &&
-        ty >= 1 && ty <= dim(Disp)[2] &&
-        tz >= 1 && tz <= dim(Disp)[3])
-      Disp[tx, ty, tz] <- Disp[tx, ty, tz] + 1L
+  dist  <- pmin(round(rexp(indN, rate = 1 / max(meanDisp, 0.1))), pad)
+  angle <- wind_rad + runif(indN, -pi / 4, pi / 4)
+  tx <- x + round(dist * sin(angle)) + pad
+  ty <- y + round(dist * cos(angle)) + pad
+  tz <- z + sample(-maxDispZ:maxDispZ, indN, replace = TRUE) + pad
+  D  <- dim(Disp)
+  ok <- tx >= 1L & tx <= D[1] & ty >= 1L & ty <= D[2] & tz >= 1L & tz <= D[3]
+  if (any(ok)) {
+    idx  <- (tx[ok] - 1L) * D[2] * D[3] + (ty[ok] - 1L) * D[3] + tz[ok]
+    Disp <- Disp + array(tabulate(idx, nbins = prod(D)), dim = D)
   }
   Disp
 }
@@ -244,40 +301,164 @@ stochRicker <- function(N, r, K) rpois(1, lambda = ricker(N, r, K))
 
 # ── Climate helpers ───────────────────────────────────────────────────────────
 
-get_clim <- function(height, models, valid_per_model, site_names) {
-  for (site in site_names) {
-    h_key  <- sprintf("%s_h%.1f", site, height)
-    cell_c <- valid_per_model[[h_key]][1]
-    if (!is.null(cell_c) && !is.na(cell_c))
-      return(models[[h_key]][[cell_c]]$weather)
+# Build the climate data frame for one height tier.
+# Spatial mean across the raster at that height → one value per representative
+# timestep (24 hours of warmest day + 24 hours of coldest day = 48 rows).
+# Macro variables (precip, winddir) come from microenv$.weather (ERA5 hourly),
+# summarised to match the 48-row structure by taking the overall mean.
+# The result is the single climate object used for all voxels at this height.
+get_clim <- function(height, microenv) {
+  h_keys <- names(microenv)[names(microenv) != ".spatial" & names(microenv) != ".weather"]
+  avail  <- as.numeric(sub("h", "", h_keys))
+  h_key  <- h_keys[which.min(abs(avail - height))]
+  h      <- microenv[[h_key]]
+  if (is.null(h)) return(NULL)
+
+  .smean <- function(arr) {
+    if (length(dim(arr)) == 3) apply(arr, 3, mean, na.rm = TRUE)
+    else rep(mean(arr, na.rm = TRUE), 24)
   }
-  NULL
+
+  make_df <- function(slot) {
+    data.frame(
+      temp      = .smean(slot$Tz),
+      relhum    = .smean(slot$relhum),
+      windspeed = .smean(slot$windspeed),
+      swdown    = .smean(slot$Rdirdown) + .smean(slot$Rdifdown),
+      difrad    = .smean(slot$Rdifdown)
+    )
+  }
+
+  df <- rbind(make_df(h$tmax), make_df(h$tmin))  # 48 rows: 24 warm + 24 cold hours
+
+  # append macro variables from ERA5 weather — same value replicated across rows
+  w <- microenv$.weather
+  if (!is.null(w)) {
+    df$precip  <- mean(w$precip,  na.rm = TRUE)
+    df$winddir <- mean(w$winddir, na.rm = TRUE)
+  } else {
+    df$precip  <- NA_real_
+    df$winddir <- NA_real_
+  }
+  df
 }
 
+# Return the rows of clim corresponding to a given month.
+# tmax rows: 1–24 (hours of warmest day), tmin rows: 25–48 (coldest day).
+# Each month maps to two rows: one tmax hour + one tmin hour.
 get_clim_month <- function(clim, month) {
   if (is.null(clim) || nrow(clim) == 0) return(NULL)
-  hours_per_month <- floor(nrow(clim) / 12)
-  month_hours     <- ((month - 1) * hours_per_month + 1):(month * hours_per_month)
-  month_hours     <- month_hours[month_hours <= nrow(clim)]
-  clim[month_hours, ]
+  clim[c(month, month + 24), ]
+}
+
+# ── Forest structure ──────────────────────────────────────────────────────────
+
+# Populate the landscape array with randomly placed trees and derive per-voxel
+# carrying capacity from bark surface area (Myster 2017, Johansson 1974).
+#
+# forestparams must contain:
+#   stems_per_ha         tree density for trees ≥10 cm dsh (Myster 2017: ~298/ha)
+#   mean_hgt / sd_hgt    tree height distribution (m)
+#   mean_crown_r / sd_crown_r  crown radius distribution (m)
+#   trunk_r              mean trunk radius in m (Myster 2017: mean dsh 22.7 cm → 0.114 m)
+#   branch_density       m² branch surface per m² projected crown area (literature: 2–5)
+#   epiphyte_footprint_m2  bark area per individual Maxillariinae (~0.02 m²)
+#
+# Crown shape: bell curve peaking at 75% of tree height (widest) tapering to
+# point at top — approximates tropical montane cloud forest crown architecture.
+# Johansson zones 1–2 = trunk only; zones 3–5 = expanding horizontal crown.
+build_forest <- function(landscape, heights, forestparams, site_obs, resolution) {
+  dims <- dim(landscape)
+  xDim <- dims[1]; yDim <- dims[2]; zDim <- dims[3]
+
+  lat_range_m <- (max(site_obs$lat) - min(site_obs$lat)) * 111000
+  lon_range_m <- (max(site_obs$lon) - min(site_obs$lon)) * 111000 *
+                  cos(mean(site_obs$lat) * pi / 180)
+  area_ha <- (lat_range_m * lon_range_m) / 10000
+  nTree   <- max(1L, round(area_ha * forestparams$stems_per_ha))
+
+  trees <- data.frame(
+    x       = sample(1:xDim, nTree, replace = TRUE),
+    y       = sample(1:yDim, nTree, replace = TRUE),
+    height  = pmax(1.0, rnorm(nTree, forestparams$mean_hgt,    forestparams$sd_hgt)),
+    crown_r = pmax(0.5, rnorm(nTree, forestparams$mean_crown_r, forestparams$sd_crown_r))
+  )
+  trees$crown_r_cells <- trees$crown_r / resolution
+
+  # voxel height thickness (m) — used for bark surface area calculation
+  vox_heights <- diff(c(0, heights))
+
+  landscape[]  <- FALSE
+  zone         <- array(0L, dim = c(xDim, yDim, zDim))
+  carCap_voxel <- array(1L, dim = c(xDim, yDim, zDim))
+
+  for (ti in seq_len(nTree)) {
+    tx <- trees$x[ti];  ty <- trees$y[ti]
+    th <- trees$height[ti];  cr <- trees$crown_r_cells[ti]
+
+    x_range <- max(1, tx - ceiling(cr)):min(xDim, tx + ceiling(cr))
+    y_range <- max(1, ty - ceiling(cr)):min(yDim, ty + ceiling(cr))
+
+    for (x in x_range) {
+      for (y in y_range) {
+        horiz_dist <- sqrt((x - tx)^2 + (y - ty)^2)
+
+        for (z in seq_len(zDim)) {
+          h <- heights[z]
+          if (h > th || h < 0.5) next
+
+          rel_h <- h / th
+
+          jzone <- if      (rel_h < 0.10) 1L
+                   else if (rel_h < 0.30) 2L
+                   else if (rel_h < 0.50) 3L
+                   else if (rel_h < 0.80) 4L
+                   else                   5L
+
+          # Trunk zones: only the single column cell; crown zones: bell-shaped radius
+          in_tree <- if (jzone <= 2) {
+            horiz_dist == 0
+          } else {
+            crown_fraction <- (rel_h - 0.5) / 0.5       # 0 at zone 3 base, 1 at top
+            effective_r    <- cr * sin(crown_fraction * pi)  # peaks at 75% height
+            horiz_dist <= effective_r
+          }
+          if (!in_tree) next
+
+          landscape[x, y, z] <- TRUE
+          if (jzone > zone[x, y, z]) zone[x, y, z] <- jzone
+
+          # Bark surface area (m²) per voxel → carrying capacity
+          vox_h_m <- vox_heights[z]
+          bark_area <- if (jzone <= 2) {
+            2 * pi * forestparams$trunk_r * vox_h_m
+          } else {
+            crown_fraction <- (rel_h - 0.5) / 0.5
+            eff_r_m        <- cr * resolution * sin(crown_fraction * pi)  # grid cells → m
+            pi * eff_r_m^2 * forestparams$branch_density * vox_h_m
+          }
+          cap <- max(1L, as.integer(floor(bark_area / forestparams$epiphyte_footprint_m2)))
+          if (cap > carCap_voxel[x, y, z]) carCap_voxel[x, y, z] <- cap
+        }
+      }
+    }
+  }
+
+  log_msg(sprintf("build_forest: %d trees | %.1f ha | valid voxels: %d | mean carCap: %.1f",
+                  nTree, area_ha, sum(landscape), mean(carCap_voxel[landscape])))
+  list(landscape = landscape, zone = zone, carCap_voxel = carCap_voxel,
+       trees = trees, n_trees = nTree, area_ha = area_ha)
 }
 
 # ── Simulation setup ──────────────────────────────────────────────────────────
 
-init_colonization <- function(site, niches, canopy_grid, models, valid_per_model,
+init_colonization <- function(site, niches, canopy_grid, microenv,
                               resolution = 10, carCap = 1, maxDisp = 5, params,
-                              allsites = FALSE) {
-  site_name  <- site$Site
-  site_names <- unique(sub("_h.*", "", names(models)))
-
-  if (allsites) {
-    heights  <- sort(unique(as.numeric(sub(".*_h", "", names(models)))))
-    site_obs <- niches
-  } else {
-    site_model_keys <- names(models)[grepl(paste0("^", site_name, "_h"), names(models))]
-    heights  <- sort(unique(as.numeric(sub(".*_h", "", site_model_keys))))
-    site_obs <- niches[niches$Area_or_Site == site_name, ]
-  }
+                              forestparams = NULL, allsites = FALSE) {
+  site_name <- site$Site
+  h_keys    <- names(microenv)[!names(microenv) %in% c(".spatial", ".weather")]
+  heights   <- sort(as.numeric(sub("h", "", h_keys)))
+  site_obs  <- if (allsites) niches else niches[niches$Area_or_Site == site_name, ]
   zDim <- length(heights)
   lat_range_m <- (max(site_obs$lat) - min(site_obs$lat)) * 111000
   lon_range_m <- (max(site_obs$lon) - min(site_obs$lon)) * 111000 *
@@ -306,15 +487,26 @@ init_colonization <- function(site, niches, canopy_grid, models, valid_per_model
   }
 
   landscape <- array(FALSE, dim = c(xDim, yDim, zDim))
-  cg_xDim   <- nrow(canopy_grid); cg_yDim <- ncol(canopy_grid)
-  for (x in 1:xDim) for (y in 1:yDim) for (z in 1:zDim) {
-    cx <- min(x, cg_xDim); cy <- min(y, cg_yDim)
-    landscape[x, y, z] <- heights[z] <= canopy_grid[cx, cy] && heights[z] >= 0.5
+
+  if (!is.null(forestparams)) {
+    # Tree-based landscape: place stems randomly, derive zone and carCap from geometry
+    forest       <- build_forest(landscape, heights, forestparams, site_obs, resolution)
+    landscape    <- forest$landscape
+    zone         <- forest$zone
+    carCap_voxel <- forest$carCap_voxel
+  } else {
+    # Fallback: flat canopy grid ceiling, uniform carrying capacity
+    cg_xDim <- nrow(canopy_grid); cg_yDim <- ncol(canopy_grid)
+    for (x in 1:xDim) for (y in 1:yDim) for (z in 1:zDim) {
+      cx <- min(x, cg_xDim); cy <- min(y, cg_yDim)
+      landscape[x, y, z] <- heights[z] <= canopy_grid[cx, cy] && heights[z] >= 0.5
+    }
+    zone         <- array(0L, dim = c(xDim, yDim, zDim))
+    carCap_voxel <- array(as.integer(carCap), dim = c(xDim, yDim, zDim))
   }
 
-  log_msg("Pre-computing climate lookup table...")
-  clim_by_height       <- lapply(heights, function(h)
-    get_clim(h, models, valid_per_model, site_names))
+  log_msg("Pre-computing climate lookup table from microenv...")
+  clim_by_height       <- lapply(heights, function(h) get_clim(h, microenv))
   clim_month_by_height <- lapply(clim_by_height, function(clim)
     lapply(1:12, function(m) get_clim_month(clim, m)))
   log_msg("Climate lookup ready.")
@@ -344,7 +536,6 @@ init_colonization <- function(site, niches, canopy_grid, models, valid_per_model
 
   list(
     site_name            = site_name,
-    site_names           = site_names,
     site_obs             = site_obs,
     heights              = heights,
     xDim = xDim, yDim = yDim, zDim = zDim,
@@ -352,6 +543,8 @@ init_colonization <- function(site, niches, canopy_grid, models, valid_per_model
     species_ids          = species_ids,
     sp_index             = sp_index,
     landscape            = landscape,
+    zone                 = zone,
+    carCap_voxel         = carCap_voxel,
     coord_to_idx         = coord_to_idx,
     clim_by_height       = clim_by_height,
     clim_month_by_height = clim_month_by_height,
@@ -407,107 +600,166 @@ run_pass1_disperse <- function(state, abundanceA, size_A, t) {
 }
 
 # Pass 2: Dispersed seeds try to establish in new cells.
-# This is p_est(e) — the establishment probability gate.
-run_pass2_establish <- function(state, abundanceS, dispersalmatrix, t) {
-  p                <- state$params
-  pad              <- state$maxDisp
+# Vectorized per height: p_establish is a scalar per height tier (climate is
+# spatially uniform at each z), so one rbinom() call handles the full [xDim,yDim]
+# slice instead of looping voxel-by-voxel.
+run_pass2_establish <- function(state, abundanceS, abundanceJ, abundanceA,
+                                dispersalmatrix, t) {
+  p   <- state$params
+  pad <- state$maxDisp
+  tnext <- t + 1L
+  if (tnext > dim(abundanceS)[4]) return(abundanceS)
+
+  # Total occupancy across all species — needed for carCap check
+  total_occ <- apply(abundanceS[,,,t,,drop=FALSE], 1:3, sum) +
+               apply(abundanceJ[,,,t,,drop=FALSE], 1:3, sum) +
+               apply(abundanceA[,,,t,,drop=FALSE], 1:3, sum)
   total_seeds_seen <- 0L; total_established <- 0L
 
-  for (sp in 1:state$n_species) {
-    nonzero <- which(dispersalmatrix[,,,sp] > 0, arr.ind = TRUE)
-    for (i in seq_len(nrow(nonzero))) {
-      x <- nonzero[i,1] - pad; y <- nonzero[i,2] - pad; z <- nonzero[i,3] - pad
-      if (x < 1 || x > state$xDim || y < 1 || y > state$yDim ||
-          z < 1 || z > state$zDim) next
-      if (!state$landscape[x, y, z]) next
-      if (abundanceS[x, y, z, t, sp] > 0) next
-      new_seeds <- dispersalmatrix[x+pad, y+pad, z+pad, sp]
-      if (new_seeds == 0) next
-      clim <- state$clim_by_height[[z]]
+  for (sp in seq_len(state$n_species)) {
+    for (zi in seq_len(state$zDim)) {
+      clim <- state$clim_by_height[[zi]]
       if (is.null(clim)) next
-      total_seeds_seen <- total_seeds_seen + new_seeds
-      result <- establish(new_seeds, clim, p$mean_swdown_site, p$p_germ)
-      if (t < dim(abundanceS)[4])
-        abundanceS[x, y, z, t+1, sp] <- result
-      total_established <- total_established + result
+
+      # Extract the [xDim, yDim] seed-rain slice (trim padding)
+      seeds_slice <- dispersalmatrix[(pad+1L):(pad+state$xDim),
+                                     (pad+1L):(pad+state$yDim),
+                                     zi + pad, sp]
+      if (sum(seeds_slice) == 0L) next
+
+      # p_establish: scalar for this height (spatial mean already in clim)
+      relhum_mean <- mean(clim$relhum, na.rm = TRUE)
+      swdown_mean <- mean(clim$swdown[clim$swdown > 0], na.rm = TRUE)
+      p_est <- (relhum_mean / 100) *
+               min(swdown_mean / p$mean_swdown_site, 1) *
+               p$p_germ
+
+      # Mask: valid landscape, not at capacity, has seeds
+      can_est <- state$landscape[,,zi] &
+                 total_occ[,,zi] < state$carCap_voxel[,,zi] &
+                 seeds_slice > 0L
+
+      if (!any(can_est)) next
+
+      total_seeds_seen <- total_seeds_seen + sum(seeds_slice[can_est])
+      n  <- sum(can_est)
+      established <- rbinom(n, as.integer(seeds_slice[can_est]), p_est)
+      # Clamp to remaining capacity
+      space <- pmax(0L, state$carCap_voxel[,,zi][can_est] - total_occ[,,zi][can_est])
+      established <- pmin(as.integer(established), space)
+      abundanceS[,,zi,tnext,sp][can_est] <-
+        abundanceS[,,zi,tnext,sp][can_est] + established
+      total_established <- total_established + sum(established)
     }
   }
   message("Pass2: seeds seen=", total_seeds_seen, " established=", total_established)
   abundanceS
 }
 
-# Pass 3: All individuals survive (s kernel) and some advance stages (g kernel).
-# size_A[x,y,z,t,sp] is the tracked mean pseudobulb length (cm) per adult cell.
-# grow() updates size_A by Δz (climate-driven) and penalises cells where
-# fruited[x,y,z,sp]=TRUE (cost of reproduction, Zotz 1998).
-# New adults promoted from J inherit z_A_min as their starting size.
+# Pass 3: Survival and stage transitions, vectorized per height tier.
+#
+# Key insight: climate is spatially uniform at each height (get_clim returns
+# a spatial mean), so survival probability is a *scalar* per (height, month,
+# stage). One rbinom() call over the full [xDim × yDim] slice replaces the
+# old loop over every occupied voxel — same biology, far fewer R calls.
+#
+# size_A is also updated in bulk: delta_z is drawn for every cell in the slice
+# and masked post-hoc to cells that actually have adults.
 run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
                                    size_A, fruited, t) {
-  p <- state$params
+  p    <- state$params
+  xDim <- state$xDim; yDim <- state$yDim
 
-  for (sp in 1:state$n_species) {
-    occupied <- which(
-      abundanceS[,,,t,sp] > 0 | abundanceJ[,,,t,sp] > 0 | abundanceA[,,,t,sp] > 0,
-      arr.ind = TRUE)
-    if (nrow(occupied) == 0) next
+  # Helper: apply rbinom to a 2D slice with a scalar probability.
+  # Cells outside the landscape are 0 already — no masking needed.
+  .surv_slice <- function(sl, prob) {
+    if (prob <= 0 || sum(sl) == 0L) return(sl * 0L)
+    if (prob >= 1) return(sl)
+    array(rbinom(length(sl), as.integer(sl), prob), dim = dim(sl))
+  }
 
-    # ── s(z, e): monthly survival ──────────────────────────────────────────────
-    for (month in 1:12) {
-      for (i in seq_len(nrow(occupied))) {
-        x <- occupied[i,1]; y <- occupied[i,2]; z <- occupied[i,3]
-        if (!state$landscape[x, y, z]) next
-        cm <- state$clim_month_by_height[[z]][[month]]
+  for (sp in seq_len(state$n_species)) {
+
+    # ── s(z, e): monthly survival ─────────────────────────────────────────────
+    # Loop over heights × months — draw one z per stage (same approximation as
+    # before; individual size data not available) and apply vectorised rbinom.
+    for (zi in seq_len(state$zDim)) {
+      if (sum(abundanceS[,,zi,t,sp]) + sum(abundanceJ[,,zi,t,sp]) +
+          sum(abundanceA[,,zi,t,sp]) == 0L) next
+
+      for (month in 1:12) {
+        cm <- state$clim_month_by_height[[zi]][[month]]
         if (is.null(cm) || nrow(cm) == 0) next
-        abundanceS[x,y,z,t,sp] <- survive(abundanceS[x,y,z,t,sp], "S", cm,
-          beta0S = p$beta0S, beta0J = p$beta0J, beta0A = p$beta0A, beta1 = p$beta1,
-          z_S_min = p$z_S_min, z_S_max = p$z_S_max,
-          z_J_min = p$z_J_min, z_J_max = p$z_J_max,
-          z_A_min = p$z_A_min, z_A_max = p$z_A_max)
-        abundanceJ[x,y,z,t,sp] <- survive(abundanceJ[x,y,z,t,sp], "J", cm,
-          beta0S = p$beta0S, beta0J = p$beta0J, beta0A = p$beta0A, beta1 = p$beta1,
-          z_S_min = p$z_S_min, z_S_max = p$z_S_max,
-          z_J_min = p$z_J_min, z_J_max = p$z_J_max,
-          z_A_min = p$z_A_min, z_A_max = p$z_A_max)
-        abundanceA[x,y,z,t,sp] <- survive(abundanceA[x,y,z,t,sp], "A", cm,
-          beta0S = p$beta0S, beta0J = p$beta0J, beta0A = p$beta0A, beta1 = p$beta1,
-          z_S_min = p$z_S_min, z_S_max = p$z_S_max,
-          z_J_min = p$z_J_min, z_J_max = p$z_J_max,
-          z_A_min = p$z_A_min, z_A_max = p$z_A_max)
+        temp        <- mean(cm$temp,   na.rm = TRUE)
+        relhum      <- mean(cm$relhum, na.rm = TRUE)
+        swdown_mean <- mean(cm$swdown[cm$swdown > 0], na.rm = TRUE)
+        swdown_rel  <- if (!is.na(swdown_mean) && p$mean_swdown_site > 0)
+                         swdown_mean / p$mean_swdown_site else 1.0
+
+        z_S <- runif(1, p$z_S_min, p$z_S_max)
+        z_J <- runif(1, p$z_J_min, p$z_J_max)
+        # Use mean tracked adult size for the height slice (better than fixed draw)
+        z_A_mean <- mean(size_A[,,zi,t,sp][state$landscape[,,zi]], na.rm = TRUE)
+        if (is.na(z_A_mean) || z_A_mean < p$z_A_min) z_A_mean <- p$z_A_min
+
+        s_S <- survival_logit("S", z_S,      temp, relhum, swdown_rel, p$beta0S, p$beta0J, p$beta0A, p$beta1)
+        s_J <- survival_logit("J", z_J,      temp, relhum, swdown_rel, p$beta0S, p$beta0J, p$beta0A, p$beta1)
+        s_A <- survival_logit("A", z_A_mean, temp, relhum, swdown_rel, p$beta0S, p$beta0J, p$beta0A, p$beta1)
+
+        abundanceS[,,zi,t,sp] <- .surv_slice(abundanceS[,,zi,t,sp], s_S)
+        abundanceJ[,,zi,t,sp] <- .surv_slice(abundanceJ[,,zi,t,sp], s_J)
+        abundanceA[,,zi,t,sp] <- .surv_slice(abundanceA[,,zi,t,sp], s_A)
       }
     }
 
     # ── g(z'|z, e): annual stage transitions + adult size update ──────────────
-    for (i in seq_len(nrow(occupied))) {
-      x <- occupied[i,1]; y <- occupied[i,2]; z <- occupied[i,3]
-      if (!state$landscape[x, y, z]) next
-      clim_year <- state$clim_by_height[[z]]
+    for (zi in seq_len(state$zDim)) {
+      slS <- abundanceS[,,zi,t,sp]
+      slJ <- abundanceJ[,,zi,t,sp]
+      slA <- abundanceA[,,zi,t,sp]
+      if (sum(slS) + sum(slJ) + sum(slA) == 0L) next
+
+      clim_year <- state$clim_by_height[[zi]]
       if (is.null(clim_year)) next
-      nA_before <- abundanceA[x,y,z,t,sp]
-      grown <- grow(
-        nS      = abundanceS[x,y,z,t,sp],
-        nJ      = abundanceJ[x,y,z,t,sp],
-        nA      = nA_before,
-        z_A     = size_A[x,y,z,t,sp],
-        clim_year   = clim_year,
-        fruited     = fruited[x,y,z,sp],
-        psi0S       = p$psi0S,
-        psi0J       = p$psi0J,
-        beta_precip = p$beta_precip,
-        beta_rh     = p$beta_rh,
-        sigma       = p$sigma,
-        delta_z_base = p$delta_z_base,
-        cost_repro  = p$cost_repro,
-        z_A_min     = p$z_A_min,
-        z_A_max     = p$z_A_max)
-      abundanceS[x,y,z,t,sp] <- grown$nS
-      abundanceJ[x,y,z,t,sp] <- grown$nJ
-      abundanceA[x,y,z,t,sp] <- grown$nA
-      # carry size forward; new adults promoted from J start at z_A_min
-      n_promoted <- grown$nA - nA_before
-      if (n_promoted > 0 && nA_before == 0)
-        size_A[x,y,z,t,sp] <- p$z_A_min   # fresh cohort, no prior size
-      else
-        size_A[x,y,z,t,sp] <- grown$z_A
+
+      precip_annual <- mean(clim_year$precip, na.rm = TRUE) * 8760
+      relhum_mean   <- mean(clim_year$relhum, na.rm = TRUE)
+
+      p_StoJ <- growth_prob("S", precip_annual, relhum_mean,
+                            p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
+      p_JtoA <- growth_prob("J", precip_annual, relhum_mean,
+                            p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
+      # Add shared stochastic perturbation (same epsilon for all cells at this height)
+      epsilon <- rnorm(1, 0, p$sigma)
+      p_StoJ  <- pmin(1, pmax(0, p_StoJ + epsilon))
+      p_JtoA  <- pmin(1, pmax(0, p_JtoA + epsilon))
+
+      n_StoJ <- .surv_slice(slS, p_StoJ)
+      n_JtoA <- .surv_slice(slJ, p_JtoA)
+
+      abundanceS[,,zi,t,sp] <- slS - n_StoJ
+      abundanceJ[,,zi,t,sp] <- slJ + n_StoJ - n_JtoA
+      abundanceA[,,zi,t,sp] <- slA + n_JtoA
+
+      # ── Adult size update (vectorised over xy) ────────────────────────────────
+      za_slice <- size_A[,,zi,t,sp]
+      # Draw delta_z for every cell; mask to adult-occupied cells afterwards
+      delta_z <- p$delta_z_base *
+                 (precip_annual / 2500) *
+                 (relhum_mean   / 85) +
+                 rnorm(xDim * yDim, 0, p$sigma * 0.5)
+      dim(delta_z) <- c(xDim, yDim)
+      # Cost of reproduction: halve delta_z where the cell fruited this year
+      fr_slice <- fruited[,,zi,sp]
+      delta_z[fr_slice] <- delta_z[fr_slice] * p$cost_repro
+      za_new <- pmin(p$z_A_max, pmax(p$z_A_min, za_slice + delta_z))
+      # Cells newly promoted from J (no prior adults) start at z_A_min
+      fresh <- n_JtoA > 0L & slA == 0L
+      za_new[fresh] <- p$z_A_min
+      # Only write back where adults exist (preserve z_A_min in empty cells)
+      has_adult <- abundanceA[,,zi,t,sp] > 0L
+      za_slice[has_adult] <- za_new[has_adult]
+      size_A[,,zi,t,sp] <- za_slice
     }
   }
   list(S = abundanceS, J = abundanceJ, A = abundanceA, size_A = size_A)
@@ -649,7 +901,7 @@ run_spinup <- function(state, n_gens = 5, Visualize = TRUE,
 
   for (i in 1:nrow(state$site_obs)) {
     idx <- state$coord_to_idx(state$site_obs$lon[i], state$site_obs$lat[i],
-                              state$site_obs$hSnapped[i])
+                              state$site_obs$Height_m[i])
     x <- idx[1]; y <- idx[2]; z <- idx[3]
     sp <- state$sp_index[state$site_obs$FinalID[i]]
     if (x >= 1 && x <= xDim && y >= 1 && y <= yDim && state$landscape[x, y, z]) {
@@ -674,7 +926,7 @@ run_spinup <- function(state, n_gens = 5, Visualize = TRUE,
                          xlab="x", ylab="y")
       dev.flush(); Sys.sleep(sleeptime)
     }
-    spinupS <- run_pass2_establish(state, spinupS, Disp, gen)
+    spinupS <- run_pass2_establish(state, spinupS, spinupJ, spinupA, Disp, gen)
     result  <- run_pass3_survive_grow(state, spinupS, spinupJ, spinupA,
                                       size_A, fruited, gen)
     spinupS <- result$S; spinupJ <- result$J
@@ -703,15 +955,29 @@ run_spinup <- function(state, n_gens = 5, Visualize = TRUE,
 
 # ── Main wrapper ──────────────────────────────────────────────────────────────
 
-runcolonization <- function(site, niches, canopy_grid, models, valid_per_model,
+runcolonization <- function(site, niches, canopy_grid, microenv,
                             timesteps=50, resolution=10, carCap=1,
                             maxDisp=5, stochastic=FALSE,
                             Visualize=TRUE, sleeptime=0.2,
                             visualize_dispersion=FALSE, spinup=5,
-                            parameters, allsites=FALSE) {
-  state     <- init_colonization(site, niches, canopy_grid, models, valid_per_model,
+                            parameters, forestparams=NULL, allsites=FALSE,
+                            train_frac=0.70, seed=42) {
+  set.seed(seed)
+
+  # Per-species train/validation split — train_frac of observations per species
+  # are used for spin-up; the remainder are held out for validation.
+  site_obs_all <- if (allsites) niches else niches[niches$Area_or_Site == site, ]
+  train_idx <- unlist(lapply(split(seq_len(nrow(site_obs_all)),
+                                   site_obs_all$FinalID),
+                             function(idx) sample(idx, max(1L, round(length(idx) * train_frac)))))
+  niches_train <- site_obs_all[ train_idx, ]
+  niches_val   <- site_obs_all[-train_idx, ]
+  log_msg(sprintf("Train/val split: %d train | %d val observations (train_frac=%.2f)",
+                  nrow(niches_train), nrow(niches_val), train_frac))
+
+  state     <- init_colonization(site, niches_train, canopy_grid, microenv,
                                  resolution, carCap, maxDisp, params=parameters,
-                                 allsites=allsites)
+                                 forestparams=forestparams, allsites=allsites)
   xDim      <- state$xDim; yDim <- state$yDim; zDim <- state$zDim
   n_species <- state$n_species
   abundanceS      <- array(0L,          dim=c(xDim, yDim, zDim, timesteps, n_species))
@@ -739,7 +1005,7 @@ runcolonization <- function(site, niches, canopy_grid, models, valid_per_model,
   for (t in 1:(timesteps-1)) {
     pass1   <- run_pass1_disperse(state, abundanceA, size_A, t)
     Disp    <- pass1$Disp; fruited <- pass1$fruited
-    abundanceS <- run_pass2_establish(state, abundanceS, Disp, t)
+    abundanceS <- run_pass2_establish(state, abundanceS, abundanceJ, abundanceA, Disp, t)
     result  <- run_pass3_survive_grow(state, abundanceS, abundanceJ, abundanceA,
                                       size_A, fruited, t)
     abundanceS <- result$S; abundanceJ <- result$J
@@ -766,5 +1032,6 @@ runcolonization <- function(site, niches, canopy_grid, models, valid_per_model,
        totalabundanceA=totalabundanceA,
        heights=state$heights, species_ids=state$species_ids,
        xDim=xDim, yDim=yDim, zDim=zDim, n_species=n_species,
-       state=state, last_disp=Disp)
+       state=state, last_disp=Disp,
+       obs_train=niches_train, obs_val=niches_val)
 }
