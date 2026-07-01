@@ -1,6 +1,6 @@
 #!/bin/bash
-# hpc_array.sh — submit one job per site to the Marvin cluster
-# Usage: sbatch hpc_array.sh
+# microenv_array.sh — submit one job per site to the Marvin cluster
+# Usage: sbatch microenv_array.sh
 # Run from: /home/s38leste_hpc/canopymicroenv/
 #
 #SBATCH --partition=intelsr_short
@@ -10,8 +10,8 @@
 #SBATCH --output=/home/s38leste_hpc/canopymicroenv/logs/log_array_%j.out
 
 SITES=("Maquipucuna" "Mashpi" "MindoTarabita" "MiradorMindo" "Yanayacu")
-N_MONTHS=${1:-1}  # e.g. sbatch hpc_array.sh 12
+N_MONTHS=${1:-1}  # e.g. sbatch microenv_array.sh 12
 
 for i in "${!SITES[@]}"; do
-  sbatch /home/$USER/canopymicroenv/scripts/hpc_job.sh "${SITES[$i]}" "$N_MONTHS"
+  sbatch /home/$USER/canopymicroenv/scripts/run_microenv.sh "${SITES[$i]}" "$N_MONTHS"
 done

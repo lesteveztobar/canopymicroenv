@@ -80,6 +80,59 @@ make_sites <- function(csv_path, pad = 0.01) {
 
 # ── ERA5 data acquisition ─────────────────────────────────────────────────────
 
+# Concatenates a list of per-year merged ERA5 nc files along the time dimension.
+# All files must share the same spatial grid and variables (produced by
+# merge_era5_steptype_files). Used when the requested time window spans more
+# than one calendar year.
+concat_era5_nc <- function(infiles, outfile) {
+  library(ncdf4)
+  message("Concatenating ", length(infiles), " ERA5 yearly nc files...")
+
+  ncs <- lapply(infiles, nc_open)
+  src <- ncs[[1]]
+
+  # Identify time dimension by name ("valid_time" or "time"); CDS nc files do
+  # not mark it unlimited, so we cannot rely on the unlim flag.
+  tname <- names(src$dim)[grepl("time", names(src$dim), ignore.case = TRUE)][1]
+  if (is.na(tname)) stop("concat_era5_nc: no time dimension found in ", infiles[1])
+
+  # Concatenate time values across all files
+  all_tvals <- unlist(lapply(ncs, function(nc) nc$dim[[tname]]$vals))
+
+  # Build output dimensions
+  out_dims <- lapply(src$dim, function(d) {
+    if (d$name == tname)
+      ncdim_def(d$name, d$units, all_tvals, unlim = TRUE)
+    else
+      ncdim_def(d$name, d$units, d$vals, unlim = FALSE)
+  })
+  names(out_dims) <- names(src$dim)
+
+  # Build output variables (same structure as source)
+  out_vars <- lapply(names(src$var), function(vname) {
+    v     <- src$var[[vname]]
+    vdims <- lapply(v$dim, function(d) out_dims[[d$name]])
+    ncvar_def(vname, v$units, vdims, v$missval)
+  })
+  names(out_vars) <- names(src$var)
+
+  nc_out <- nc_create(outfile, vars = out_vars)
+  for (vname in names(src$var)) {
+    v      <- src$var[[vname]]
+    is_tvar <- any(sapply(v$dim, function(d) d$name == tname))
+    if (is_tvar) {
+      pieces   <- lapply(ncs, function(nc) ncvar_get(nc, vname))
+      combined <- abind::abind(pieces, along = length(dim(pieces[[1]])))
+      ncvar_put(nc_out, vname, combined)
+    } else {
+      ncvar_put(nc_out, vname, ncvar_get(src, vname))
+    }
+  }
+  nc_close(nc_out)
+  lapply(ncs, nc_close)
+  message("Concatenated -> ", outfile)
+}
+
 # Merges the three ERA5 stepType netCDF files (accum, avg, instant) that CDS
 # delivers separately into one combined file. Renames radiation variables to
 # match the names expected by microclimdata::era5_process().
@@ -137,52 +190,75 @@ fix_lsm <- function(nc_path) {
   message("LSM fix: ", n, " near-land cells set to 1")
 }
 
-# Downloads ERA5 hourly climate data for the site bounding box and time window,
-# merges stepType files, fixes LSM, and processes to a point climate data frame
-# for runpointmodel(). Skips download if merged file already exists.
+# Downloads ERA5 hourly climate data for the site bounding box and time window.
+# Submits one CDS request per month (by_month = TRUE), each to its own temp dir
+# to avoid stepType filename collisions, merges them individually, then
+# concatenates all months into the final site nc. Resumes cleanly if interrupted.
 get_weather <- function(site, credentials, r, tme, dir, overwrite = FALSE, output = "point") {
   message("")
   merged_file <- file.path(dir, paste0(site$Site, ".nc"))
 
   if (!file.exists(merged_file) || overwrite) {
-    expected_files <- c(
-      "data_stream-oper_stepType-accum.nc",
-      "data_stream-oper_stepType-avg.nc",
-      "data_stream-oper_stepType-instant.nc"
+    req <- mcera5::build_era5_request(
+      xmin       = site$lon_min, xmax = site$lon_max,
+      ymin       = site$lat_min, ymax = site$lat_max,
+      start_time = site$tme_start, end_time = site$tme_end,
+      by_month   = TRUE, outfile_name = site$Site
     )
-    existing <- file.exists(file.path(dir, expected_files))
 
-    if (!all(existing) || overwrite) {
-      message("Downloading ERA5 data for site ", site$Site, "...")
-      req <- mcera5::build_era5_request(
-        xmin         = site$lon_min, xmax = site$lon_max,
-        ymin         = site$lat_min, ymax = site$lat_max,
-        start_time   = site$tme_start, end_time = site$tme_end,
-        by_month     = TRUE, outfile_name = site$Site
-      )
-      ecmwfr::wf_request(
-        request  = req[[1]],
-        user     = credentials$username[credentials$Site == "CDS"],
-        transfer = TRUE, path = paste0(dir, "/"), retry = 120, verbose = TRUE
-      )
-      for (z in list.files(dir, pattern = "\\.zip$", full.names = TRUE)) {
-        unzip(z, exdir = dir)
-        unlink(z)
+    month_nc_files <- character(length(req))
+
+    for (i in seq_along(req)) {
+      req_year  <- req[[i]]$year
+      req_month <- req[[i]]$month
+      month_nc  <- file.path(dir, sprintf("%s_%s_%s.nc", site$Site, req_year, req_month))
+
+      if (!file.exists(month_nc) || overwrite) {
+        month_tmp <- file.path(dir, sprintf("era5_tmp_%s_%s", req_year, req_month))
+        dir.create(month_tmp, showWarnings = FALSE)
+
+        message("Downloading ERA5 for ", site$Site,
+                " (", req_year, "-", req_month, ")...")
+        ecmwfr::wf_request(
+          request  = req[[i]],
+          user     = credentials$username[credentials$Site == "CDS"],
+          transfer = TRUE, path = paste0(month_tmp, "/"), retry = 120, verbose = TRUE
+        )
+        for (z in list.files(month_tmp, pattern = "\\.zip$", full.names = TRUE)) {
+          unzip(z, exdir = month_tmp)
+          unlink(z)
+        }
+
+        merge_era5_steptype_files(pathin = month_tmp, pathout = month_nc)
+        fix_lsm(month_nc)
+        unlink(month_tmp, recursive = TRUE)
+      } else {
+        message("ERA5 for ", site$Site, " ", req_year, "-", req_month,
+                " already cached, skipping.")
+        fix_lsm(month_nc)
       }
-    } else {
-      message("ERA5 stepType files already exist, skipping download.")
+      month_nc_files[i] <- month_nc
     }
 
-    message("Merging ERA5 stepType files...")
-    merge_era5_steptype_files(pathin = dir, pathout = merged_file)
-    message("Fixing land-sea mask...")
-    fix_lsm(merged_file)
-    files <- list.files(dir, pattern = "^data_stream", full.names = TRUE)
-    if (length(files) > 0) { unlink(files); message("Deleted ", length(files), " stepType files.") }
+    if (length(month_nc_files) == 1L) {
+      file.rename(month_nc_files, merged_file)
+    } else {
+      concat_era5_nc(month_nc_files, merged_file)
+      unlink(month_nc_files)
+    }
+    message("Merged ERA5 file ready: ", merged_file)
 
   } else {
     message("ERA5 merged file already exists for ", site$Site, ", skipping download.")
     fix_lsm(merged_file)
+  }
+
+  # Remove any leftover era5_tmp_* directories that would confuse era5_process()
+  stale_tmp <- list.dirs(dir, recursive = FALSE, full.names = TRUE)
+  stale_tmp <- stale_tmp[grepl("era5_tmp_", basename(stale_tmp))]
+  if (length(stale_tmp) > 0) {
+    message("Cleaning up stale temp dirs: ", paste(basename(stale_tmp), collapse = ", "))
+    unlink(stale_tmp, recursive = TRUE)
   }
 
   message("Processing ERA5 data to point climate data frame...")

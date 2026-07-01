@@ -1,14 +1,14 @@
 #!/bin/bash
-# hpc_job.sh — run microclimate model for a single site
-# Called by hpc_array.sh; do not submit directly.
+# run_microenv.sh — run microclimate model for a single site
+# Called by microenv_array.sh; do not submit directly.
 #
-#SBATCH --partition=intelsr_short
+#SBATCH --partition=lm_short
 #SBATCH --account=ag_biob_scabral
 #SBATCH --time=08:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=500G
 #SBATCH --output=/home/s38leste_hpc/canopymicroenv/logs/log_%j.out
 
 module purge
@@ -23,6 +23,11 @@ export CANOPY_PYTHON="/home/s38leste_hpc/.conda/envs/canopy_rgee/bin/python"
 
 SITE=$1      # e.g. "Maquipucuna"
 N_MONTHS=${2:-1}  # months of ERA5 to fetch backwards from tme_end (default: 1)
+
+# Allocate (or find existing) Lustre workspace for per-height temp files.
+# ws_allocate is idempotent: calling it again returns the same path.
+export CANOPY_SCRATCH=$(ws_allocate canopymicroenv 90)
+echo "Scratch workspace: $CANOPY_SCRATCH"
 
 cd /home/$USER/canopymicroenv
 $CANOPY_PYTHON -c "import ee; print('ee import OK')" 2>&1

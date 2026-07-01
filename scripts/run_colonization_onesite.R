@@ -17,6 +17,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 library(plotly)
 library(ggplot2)
+library(patchwork)
+library(parallel)
 source("scripts/paths.R")
 source("scripts/get_colonization.R")
 
@@ -51,9 +53,9 @@ if (is.null(microenv$.weather)) {
   rm(pm)
   log_msg("Patch saved.")
 }
-log_msg(sprintf("Heights available: %s",
-  paste(names(microenv)[!names(microenv) %in% c(".spatial", ".weather")],
-        collapse = ", ")))
+available_heights <- microenv_heights(microenv)
+log_msg(sprintf("Heights available: %d (%.1f-%.1fm)",
+  length(available_heights), min(available_heights), max(available_heights)))
 
 # ── 2. Field observations ─────────────────────────────────────────────────────
 niches <- read.csv("data/csv/combinedv3.csv")
@@ -92,10 +94,11 @@ forestparams <- list(
 
 # ── 5. Parameters ─────────────────────────────────────────────────────────────
 # If a params file was passed, load it — otherwise use literature defaults.
-# To run a sensitivity experiment:
-#   params <- readRDS("params_experiment1.rds")  (or build programmatically)
-#   saveRDS(params, "params_experiment1.rds")
-#   Rscript run_colonization_onesite.R Maquipucuna params_experiment1.rds exp1
+# Sensitivity-experiment RDS files (built by make_params.R) store the swept
+# field as a vector of candidate values (e.g. p_poll = c(0.05, ..., 0.70));
+# every other field stays scalar. Step 7 detects that vector and sweeps over
+# it via run_experiment() instead of doing a single runcolonization() call.
+#   Rscript run_colonization_onesite.R Maquipucuna data/params/p_poll.rds pollination_success
 if (!is.null(params_file) && file.exists(params_file)) {
   params <- readRDS(params_file)
   log_msg(sprintf("Loaded params from %s", params_file))
@@ -119,10 +122,13 @@ if (!is.null(params_file) && file.exists(params_file)) {
     canopy_z = mean_canopy,  lambda = 1,  Ut = 1
   )
 }
+# canopy_z is site-specific (mean canopy height); always set it from this
+# site's observations, overriding whatever a shared sensitivity-experiment
+# params file may have carried.
+params$canopy_z <- mean_canopy
 
 # ── 6. Sanity check ───────────────────────────────────────────────────────────
-clim_test <- get_clim(as.numeric(sub("h", "",
-  names(microenv)[!names(microenv) %in% c(".spatial", ".weather")][1])), microenv)
+clim_test <- get_clim(available_heights[1], microenv)
 stopifnot(
   is.data.frame(clim_test),
   nrow(clim_test) == 48,
@@ -133,23 +139,42 @@ log_msg(sprintf("Climate check passed: %.1f°C mean temp, %.0f mm/yr precip",
   mean(clim_test$precip, na.rm = TRUE) * 8760))
 
 # ── 7. Run colonization model ─────────────────────────────────────────────────
-log_msg(sprintf("Starting colonization run [%s | %s]...", site_name, exp_tag))
+# A sensitivity-experiment params file has exactly one vector-valued field —
+# sweep it with run_experiment(); a plain params file (or the literature
+# defaults) has none, so run the model once via runcolonization().
+swept_param <- names(params)[vapply(params, length, integer(1)) > 1]
+if (length(swept_param) > 1) {
+  stop(sprintf("params file has more than one vector-valued field: %s",
+               paste(swept_param, collapse = ", ")))
+}
 
-result <- runcolonization(
-  site         = site,
-  niches       = niches,
-  canopy_grid  = canopy_grid,
-  microenv     = microenv,
-  timesteps    = 30,
-  resolution   = 10,
-  carCap       = 5,           # fallback scalar (used only if forestparams = NULL)
-  maxDisp      = 10,
-  spinup       = 5,
-  Visualize    = !interactive(),
-  sleeptime    = 0.2,
-  parameters   = params,
-  forestparams = forestparams
-)
+if (length(swept_param) == 1) {
+  N_CORES <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", NA)))
+  if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
+  N_REPS <- 3  # replicates per swept value
+  log_msg(sprintf("Sweeping %s across %d values [%s] with %d reps on %d cores...",
+                  swept_param, length(params[[swept_param]]),
+                  paste(params[[swept_param]], collapse = ", "), N_REPS, N_CORES))
+  result <- run_experiment(swept_param, params[[swept_param]], base = params,
+                            n_reps = N_REPS, timesteps = 30, spinup = 5)
+} else {
+  log_msg(sprintf("Starting colonization run [%s | %s]...", site_name, exp_tag))
+  result <- runcolonization(
+    site         = site,
+    niches       = niches,
+    canopy_grid  = canopy_grid,
+    microenv     = microenv,
+    timesteps    = 30,
+    resolution   = 10,
+    carCap       = 5,           # fallback scalar (used only if forestparams = NULL)
+    maxDisp      = 10,
+    spinup       = 5,
+    Visualize    = !interactive(),
+    sleeptime    = 0.2,
+    parameters   = params,
+    forestparams = forestparams
+  )
+}
 
 out_path <- file.path(PROCESSED_DIR,
   sprintf("colonization_%s_%s.rds", site_name, exp_tag))
@@ -158,6 +183,10 @@ log_msg(sprintf("Done. Results saved to %s", out_path))
 
 # ── 8. Plots (interactive only) ───────────────────────────────────────────────
 if (interactive()) {
-  plot_abundance(result)
-  plot_3d_abundance(result)
+  if (is.data.frame(result)) {
+    print(plot_experiment(result, swept_param))
+  } else {
+    plot_abundance(result)
+    plot_3d_abundance(result)
+  }
 }

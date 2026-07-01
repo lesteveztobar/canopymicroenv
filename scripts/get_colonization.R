@@ -301,6 +301,34 @@ stochRicker <- function(N, r, K) rpois(1, lambda = ricker(N, r, K))
 
 # ── Climate helpers ───────────────────────────────────────────────────────────
 
+# List of usable height tiers for a microenv object, regardless of storage
+# format (see load_height() below for the two formats).
+microenv_heights <- function(microenv) {
+  if (!is.null(microenv$.height_dir)) return(sort(as.numeric(microenv$.heights)))
+  h_keys <- names(microenv)[!names(microenv) %in% c(".spatial", ".weather")]
+  sort(as.numeric(sub("h", "", h_keys)))
+}
+
+# Load one height tier's raw tmax/tmin rasters.
+# New-format microenv objects (run_microclimate_site.R) only carry a manifest
+# — heights (.heights) and a directory (.height_dir) of per-height RDS files
+# on scratch, saved this way because loading every height into memory at once
+# needs hundreds of GB. Old-format microenv objects still embed each height's
+# data directly as a list element named "h<value>".
+load_height <- function(microenv, height) {
+  if (!is.null(microenv$.height_dir)) {
+    avail  <- microenv$.heights
+    h_near <- avail[which.min(abs(avail - height))]
+    h_path <- file.path(microenv$.height_dir, sprintf("h%.2f.rds", h_near))
+    if (!file.exists(h_path)) return(NULL)
+    return(readRDS(h_path))
+  }
+  h_keys <- names(microenv)[!names(microenv) %in% c(".spatial", ".weather")]
+  avail  <- as.numeric(sub("h", "", h_keys))
+  h_key  <- h_keys[which.min(abs(avail - height))]
+  microenv[[h_key]]
+}
+
 # Build the climate data frame for one height tier.
 # Spatial mean across the raster at that height → one value per representative
 # timestep (24 hours of warmest day + 24 hours of coldest day = 48 rows).
@@ -308,10 +336,7 @@ stochRicker <- function(N, r, K) rpois(1, lambda = ricker(N, r, K))
 # summarised to match the 48-row structure by taking the overall mean.
 # The result is the single climate object used for all voxels at this height.
 get_clim <- function(height, microenv) {
-  h_keys <- names(microenv)[names(microenv) != ".spatial" & names(microenv) != ".weather"]
-  avail  <- as.numeric(sub("h", "", h_keys))
-  h_key  <- h_keys[which.min(abs(avail - height))]
-  h      <- microenv[[h_key]]
+  h <- load_height(microenv, height)
   if (is.null(h)) return(NULL)
 
   .smean <- function(arr) {
@@ -456,8 +481,7 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
                               resolution = 10, carCap = 1, maxDisp = 5, params,
                               forestparams = NULL, allsites = FALSE) {
   site_name <- site$Site
-  h_keys    <- names(microenv)[!names(microenv) %in% c(".spatial", ".weather")]
-  heights   <- sort(as.numeric(sub("h", "", h_keys)))
+  heights   <- microenv_heights(microenv)
   site_obs  <- if (allsites) niches else niches[niches$Area_or_Site == site_name, ]
   zDim <- length(heights)
   lat_range_m <- (max(site_obs$lat) - min(site_obs$lat)) * 111000
@@ -1035,3 +1059,92 @@ runcolonization <- function(site, niches, canopy_grid, microenv,
        state=state, last_disp=Disp,
        obs_train=niches_train, obs_val=niches_val)
 }
+
+run_one <- function(params, tag = "run", timesteps = 20, spinup = 3) {
+  tryCatch(
+    runcolonization(
+      site         = site,
+      niches       = niches,
+      canopy_grid  = canopy_grid,
+      microenv     = microenv,
+      timesteps    = timesteps,
+      resolution   = 10,
+      carCap       = 5,
+      maxDisp      = 10,
+      spinup       = spinup,
+      Visualize    = FALSE,
+      parameters   = params,
+      forestparams = forestparams
+    ),
+    error = function(e) { message("ERROR [", tag, "]: ", e$message); NULL }
+  )
+}
+
+# ── Experiment runner ─────────────────────────────────────────────────────────
+# Varies param_name across values; n_reps replicates per value.
+# Returns tidy data frame of S, J, A totals over time.
+
+run_experiment <- function(param_name, values, base = base_params,
+                           n_reps = 2, timesteps = 20, spinup = 3) {
+  jobs <- expand.grid(val = values, rep = seq_len(n_reps),
+                      stringsAsFactors = FALSE)
+  cat(sprintf("\n====== %s (%d jobs on %d cores) ======\n",
+              param_name, nrow(jobs), N_CORES))
+
+  rows <- mclapply(seq_len(nrow(jobs)), function(i) {
+    val <- jobs$val[i]; rep <- jobs$rep[i]
+    p   <- base; p[[param_name]] <- val
+    # Suppress log_msg inside workers
+    suppressMessages(
+      r <- run_one(p, tag = sprintf("%s=%s rep%d", param_name, val, rep),
+                   timesteps = timesteps, spinup = spinup)
+    )
+    if (is.null(r)) return(NULL)
+    T <- timesteps
+    data.frame(
+      param_value = as.character(val), rep = rep, t = 1:T,
+      totalS = r$totalabundanceS, totalJ = r$totalabundanceJ,
+      totalA = r$totalabundanceA,
+      total  = r$totalabundanceS + r$totalabundanceJ + r$totalabundanceA,
+      extinct = all(r$totalabundanceA[(T %/% 2):T] == 0)
+    )
+  }, mc.cores = N_CORES)
+
+  df <- do.call(rbind, Filter(Negate(is.null), rows))
+  df$param_value <- factor(df$param_value, levels = as.character(values))
+  cat(sprintf("  Done: %d/%d runs succeeded\n",
+              length(Filter(Negate(is.null), rows)), nrow(jobs)))
+  df
+}
+
+# ── Plot: S, J, A panels ──────────────────────────────────────────────────────
+
+plot_experiment <- function(df, param_name, title = NULL) {
+  title <- title %||% sprintf("Effect of %s — Maquipucuna", param_name)
+
+  make_panel <- function(y_var, y_lab, col) {
+    mean_df <- aggregate(as.formula(paste(y_var, "~ param_value + t")),
+                         data = df, FUN = mean)
+    ggplot(df, aes(x = t, y = .data[[y_var]], colour = param_value,
+                   group = interaction(param_value, rep))) +
+      geom_line(alpha = 0.20, linewidth = 0.4) +
+      geom_line(data = mean_df,
+                aes(x = t, y = .data[[y_var]], colour = param_value,
+                    group = param_value),
+                linewidth = 1.2, inherit.aes = FALSE) +
+      scale_colour_brewer(palette = "RdYlBu", direction = -1, name = param_name) +
+      labs(x = "Year", y = y_lab) +
+      theme_minimal(base_size = 10) +
+      theme(legend.position = "right")
+  }
+
+  (make_panel("totalS", "Seedlings", "#4dac26") +
+   make_panel("totalJ", "Juveniles", "#f1a340") +
+   make_panel("totalA", "Adults",    "#08519c")) +
+    plot_annotation(
+      title   = title,
+      caption = "Thick = mean of replicates; thin = individual runs"
+    )
+}
+
+`%||%` <- function(a, b) if (!is.null(a)) a else b

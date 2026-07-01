@@ -62,6 +62,11 @@ for (d in c(site_dir, site_dtm_dir, site_soil_dir,
 site_env_path   <- file.path(PROCESSED_DIR, sprintf("microenv_%s.rds",   site$Site))
 site_model_path <- file.path(PROCESSED_DIR, sprintf("pointmodel_%s.rds", site$Site))
 
+# Per-height temp files go to Lustre scratch (set via CANOPY_SCRATCH in hpc_job.sh).
+# Falls back to PROCESSED_DIR for local/interactive runs.
+scratch_base <- Sys.getenv("CANOPY_SCRATCH", unset = "")
+scratch_base <- if (nchar(scratch_base) > 0 && dir.exists(scratch_base)) scratch_base else PROCESSED_DIR
+
 if (file.exists(site_env_path)) {
   log_msg(sprintf("Microenv already exists for %s — nothing to do.", site$Site))
   quit(status = 0)
@@ -134,12 +139,23 @@ if (file.exists(site_model_path)) {
 }
 
 # ── 3. Grid model (parallel heights) ─────────────────────────────────────────
+
+# runpointmodela returns NA for cells where the model fails (e.g. ocean/masked
+# cells). runmicro iterates weather[[k]] up to length(dtmc) — the ERA5 cell
+# count — so the model list must stay that length. Replace NA cells with a copy
+# of the first valid cell; their spatial output is masked/unused anyway.
+n_before  <- length(model)
+valid_mp  <- Filter(function(x) inherits(x, "micropoint"), model)
+if (length(valid_mp) == 0) stop("All grid cells failed in runpointmodela — check ERA5 coverage and LSM.")
+model <- lapply(model, function(x) if (inherits(x, "micropoint")) x else valid_mp[[1]])
+log_msg(sprintf("Valid grid cells: %d / %d", length(valid_mp), n_before))
+
 log_msg("Subsetting point model to monthly max/min days...")
 micropoint_mx <- microclimf::subsetpointmodela(model, tstep = "month", what = "tmax")
 micropoint_mn <- microclimf::subsetpointmodela(model, tstep = "month", what = "tmin")
 
 heights    <- seq(0.1, site$hObs_max, by = 0.1)
-height_dir <- file.path(PROCESSED_DIR, sprintf("microenv_%s_heights", site$Site))
+height_dir <- file.path(scratch_base, sprintf("microenv_%s_heights", site$Site))
 dir.create(height_dir, recursive = TRUE, showWarnings = FALSE)
 
 era5_template <- terra::rast(weatherdata[[1]])[[1]]
@@ -182,16 +198,18 @@ parallel::mclapply(seq_along(heights), function(i) {
 n_done <- sum(file.exists(file.path(height_dir, sprintf("h%.2f.rds", heights))))
 log_msg(sprintf("Height loop done: %d/%d complete.", n_done, n_heights))
 
-# ── 4. Assemble and save ──────────────────────────────────────────────────────
-log_msg("Assembling combined microenv RDS...")
-site_height_envs <- lapply(
-  setNames(heights, sprintf("h%.2f", heights)),
-  function(h) readRDS(file.path(height_dir, sprintf("h%.2f.rds", h))))
-site_height_envs$.spatial <- list(ext = terra::ext(dtmdata), crs = terra::crs(dtmdata))
-site_height_envs$.weather <- model[[1]]$weather
-
-saveRDS(site_height_envs, site_env_path)
-log_msg(sprintf("Saved microenvironment to %s", site_env_path))
-
-unlink(height_dir, recursive = TRUE)
-log_msg("Per-height cache cleaned up. Done.")
+# ── 4. Save manifest ─────────────────────────────────────────────────────────
+# Each height file is ~6 GB in memory (10 spatial arrays × 374×372×288).
+# Loading all heights at once would require hundreds of GB — instead save a
+# small manifest that points to the per-height files in scratch. Downstream
+# code reads individual heights on demand via load_height().
+log_msg("Saving microenv manifest...")
+manifest <- list(
+  .heights    = heights,
+  .height_dir = height_dir,
+  .spatial    = list(ext = terra::ext(dtmdata), crs = terra::crs(dtmdata)),
+  .weather    = model[[1]]$weather
+)
+saveRDS(manifest, site_env_path)
+log_msg(sprintf("Manifest saved to %s  (height_dir=%s)", site_env_path, height_dir))
+log_msg("Done. Height files remain in scratch — do not ws_release until downstream analysis is complete.")

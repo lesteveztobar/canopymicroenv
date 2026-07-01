@@ -12,6 +12,7 @@ BASE_DIR <- "/home/s38leste_hpc/canopymicroenv"
 RAW_DIR       <- file.path(BASE_DIR, "data", "raw")
 CSV_DIR       <- file.path(BASE_DIR, "data", "csv")
 PROCESSED_DIR <- file.path(BASE_DIR, "data", "processed")
+PARAMS_DIR    <- file.path(BASE_DIR, "data", "params")
 
 # project
 SCRIPTS_DIR   <- file.path(BASE_DIR, "scripts")
