@@ -331,10 +331,15 @@ load_height <- function(microenv, height) {
 
 # Build the climate data frame for one height tier.
 # Spatial mean across the raster at that height → one value per representative
-# timestep (24 hours of warmest day + 24 hours of coldest day = 48 rows).
+# timestep. microclimf::subsetpointmodela(tstep="month") + runmicro() produce
+# one representative day per calendar month, 24 hourly values each, so a full
+# year's tmax (or tmin) array holds 12 x 24 = 288 hourly steps concatenated in
+# month order (Jan..Dec). Each row is tagged with its calendar `month` so
+# get_clim_month() can select the right block regardless of the exact hours-
+# per-month count. Older microenv objects with just one representative day
+# (24 steps, no month structure) fall back to reusing that day for every month.
 # Macro variables (precip, winddir) come from microenv$.weather (ERA5 hourly),
-# summarised to match the 48-row structure by taking the overall mean.
-# The result is the single climate object used for all voxels at this height.
+# replicated across every row (annual mean, not month-resolved).
 get_clim <- function(height, microenv) {
   h <- load_height(microenv, height)
   if (is.null(h)) return(NULL)
@@ -344,17 +349,27 @@ get_clim <- function(height, microenv) {
     else rep(mean(arr, na.rm = TRUE), 24)
   }
 
-  make_df <- function(slot) {
-    data.frame(
-      temp      = .smean(slot$Tz),
-      relhum    = .smean(slot$relhum),
-      windspeed = .smean(slot$windspeed),
-      swdown    = .smean(slot$Rdirdown) + .smean(slot$Rdifdown),
-      difrad    = .smean(slot$Rdifdown)
-    )
+  make_df <- function(slot, day_type) {
+    temp      <- .smean(slot$Tz)
+    relhum    <- .smean(slot$relhum)
+    windspeed <- .smean(slot$windspeed)
+    swdown    <- .smean(slot$Rdirdown) + .smean(slot$Rdifdown)
+    difrad    <- .smean(slot$Rdifdown)
+    n <- length(temp)
+    if (n %% 12 == 0 && n > 24) {
+      month <- rep(1:12, each = n / 12)
+    } else {
+      # single representative day (old format) — reuse it for every month
+      month     <- rep(1:12, each = n)
+      temp      <- rep(temp, 12);      relhum <- rep(relhum, 12)
+      windspeed <- rep(windspeed, 12); swdown <- rep(swdown, 12)
+      difrad    <- rep(difrad, 12)
+    }
+    data.frame(day_type = day_type, month = month, temp = temp, relhum = relhum,
+               windspeed = windspeed, swdown = swdown, difrad = difrad)
   }
 
-  df <- rbind(make_df(h$tmax), make_df(h$tmin))  # 48 rows: 24 warm + 24 cold hours
+  df <- rbind(make_df(h$tmax, "tmax"), make_df(h$tmin, "tmin"))
 
   # append macro variables from ERA5 weather — same value replicated across rows
   w <- microenv$.weather
@@ -368,12 +383,76 @@ get_clim <- function(height, microenv) {
   df
 }
 
-# Return the rows of clim corresponding to a given month.
-# tmax rows: 1–24 (hours of warmest day), tmin rows: 25–48 (coldest day).
-# Each month maps to two rows: one tmax hour + one tmin hour.
+# Return the rows of clim (both tmax and tmin blocks) for a given calendar month.
 get_clim_month <- function(clim, month) {
   if (is.null(clim) || nrow(clim) == 0) return(NULL)
-  clim[c(month, month + 24), ]
+  clim[clim$month == month, ]
+}
+
+# Build the full per-height (and per-height-per-month) climate lookup table
+# for one microenv object. This is the same for every run against a given
+# site/microenv, no matter what biological parameters are being tested — so
+# callers that run many simulations against the same microenv (e.g.
+# run_experiment()'s parameter sweep) should build this once up front and
+# pass it into runcolonization()/init_colonization() via `clim_cache` instead
+# of letting each run reload every height's climate raster from disk.
+build_clim_cache <- function(microenv) {
+  heights              <- microenv_heights(microenv)
+  clim_by_height        <- lapply(heights, function(h) get_clim(h, microenv))
+  clim_month_by_height <- lapply(clim_by_height, function(clim)
+    lapply(1:12, function(m) get_clim_month(clim, m)))
+  list(clim_by_height = clim_by_height, clim_month_by_height = clim_month_by_height)
+}
+
+# ── Species climate niche ──────────────────────────────────────────────────────
+# Realized niche per species: the range of each climate variable at the
+# heights where that species was actually observed, expanded by a symmetric
+# tolerance pad — a fraction of the observed range added to each side. E.g.
+# an observed temp range of 23.4-23.6 C (0.2 C wide) with pad=0.5 becomes
+# 23.3-23.7 C (0.5 x 0.2 C added on each end). pad=0 keeps the raw observed
+# range, which is often a single point (zero width) given how few
+# observations most species have. Padding is proportional to that width, so
+# a zero-width range would get *zero* padding at any pad level — min_width
+# is an absolute floor per variable so pad still has an effect for
+# single-observation species (the common case here). Only vars that actually
+# vary by height belong here: precip/winddir come from microenv$.weather
+# (site-wide, not height-resolved) and would always be zero-width regardless
+# of observation count, so they're excluded by default.
+get_niche <- function(site_obs, microenv, vars = c("temp", "relhum"), pad = 0,
+                      min_width = c(temp = 0.5, relhum = 5)) {
+  species_ids <- sort(unique(site_obs$FinalID))
+  niches <- lapply(species_ids, function(sp) {
+    obs_sp <- site_obs[site_obs$FinalID == sp & !is.na(site_obs$Height_m), ]
+    clim_vals <- lapply(seq_len(nrow(obs_sp)), function(i) {
+      cl <- get_clim(obs_sp$Height_m[i], microenv)
+      if (is.null(cl)) return(NULL)
+      vapply(vars, function(v) mean(cl[[v]], na.rm = TRUE), numeric(1))
+    })
+    clim_vals <- do.call(rbind, Filter(Negate(is.null), clim_vals))
+    if (is.null(clim_vals) || nrow(clim_vals) == 0) return(NULL)
+    lo    <- apply(clim_vals, 2, min, na.rm = TRUE)
+    hi    <- apply(clim_vals, 2, max, na.rm = TRUE)
+    width <- pmax(hi - lo, min_width[vars])
+    list(lo = lo - pad * width, hi = hi + pad * width)
+  })
+  names(niches) <- species_ids
+  niches
+}
+
+# Fraction of niche variables whose value at a given height/time falls within
+# a species' (padded) niche box — 1 = matches on every variable, 0 = outside
+# on all of them. A species with no usable observations (niche = NULL) isn't
+# gated at all (returns 1), since we have no basis to restrict it.
+niche_match <- function(clim_values, niche) {
+  if (is.null(niche)) return(1)
+  vars <- names(niche$lo)
+  hits <- vapply(vars, function(v) {
+    val <- clim_values[[v]]
+    if (is.null(val) || is.na(val)) return(NA)
+    val >= niche$lo[[v]] && val <= niche$hi[[v]]
+  }, logical(1))
+  if (all(is.na(hits))) return(1)
+  mean(hits, na.rm = TRUE)
 }
 
 # ── Forest structure ──────────────────────────────────────────────────────────
@@ -479,7 +558,8 @@ build_forest <- function(landscape, heights, forestparams, site_obs, resolution)
 
 init_colonization <- function(site, niches, canopy_grid, microenv,
                               resolution = 10, carCap = 1, maxDisp = 5, params,
-                              forestparams = NULL, allsites = FALSE) {
+                              forestparams = NULL, allsites = FALSE,
+                              clim_cache = NULL) {
   site_name <- site$Site
   heights   <- microenv_heights(microenv)
   site_obs  <- if (allsites) niches else niches[niches$Area_or_Site == site_name, ]
@@ -529,11 +609,15 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
     carCap_voxel <- array(as.integer(carCap), dim = c(xDim, yDim, zDim))
   }
 
-  log_msg("Pre-computing climate lookup table from microenv...")
-  clim_by_height       <- lapply(heights, function(h) get_clim(h, microenv))
-  clim_month_by_height <- lapply(clim_by_height, function(clim)
-    lapply(1:12, function(m) get_clim_month(clim, m)))
-  log_msg("Climate lookup ready.")
+  if (is.null(clim_cache)) {
+    log_msg("Pre-computing climate lookup table from microenv...")
+    clim_cache <- build_clim_cache(microenv)
+    log_msg("Climate lookup ready.")
+  } else {
+    log_msg("Using precomputed climate lookup table.")
+  }
+  clim_by_height       <- clim_cache$clim_by_height
+  clim_month_by_height <- clim_cache$clim_month_by_height
 
   valid_clim <- which(!sapply(clim_by_height, is.null))
   mid_zi     <- valid_clim[which.min(abs(heights[valid_clim] -
@@ -550,6 +634,16 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
   log_msg(sprintf("Valid climate heights: %d/%d | mean_swdown: %.1f",
                   length(valid_clim), zDim, mean_swdown_site))
 
+  # Per-species realized climate niche, gating establishment in
+  # run_pass2_establish() — see get_niche()/niche_match(). niche_pad = 0
+  # (default) keeps the raw observed range; make_params.R's niche_pad
+  # experiment sweeps this to test whether padding sparse per-species
+  # observations changes persistence.
+  niche_pad         <- if (!is.null(params$niche_pad)) params$niche_pad else 0
+  niches_by_species <- get_niche(site_obs, microenv, pad = niche_pad)
+  log_msg(sprintf("Niche pad %.3f: %d/%d species have a usable observed niche",
+                  niche_pad, sum(!sapply(niches_by_species, is.null)), n_species))
+
   params$a                <- a
   params$mean_swdown_site <- mean_swdown_site
   # ensure size-tracking defaults exist if caller omitted them
@@ -565,6 +659,7 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
     xDim = xDim, yDim = yDim, zDim = zDim,
     n_species            = n_species,
     species_ids          = species_ids,
+    niches_by_species    = niches_by_species,
     sp_index             = sp_index,
     landscape            = landscape,
     zone                 = zone,
@@ -657,6 +752,16 @@ run_pass2_establish <- function(state, abundanceS, abundanceJ, abundanceA,
       p_est <- (relhum_mean / 100) *
                min(swdown_mean / p$mean_swdown_site, 1) *
                p$p_germ
+
+      # Gate by this species' realized climate niche (see get_niche() /
+      # niche_match() in init_colonization()) — a height whose climate falls
+      # outside where the species was actually observed is less likely to be
+      # colonized, tempered by params$niche_pad.
+      niche_sp <- state$niches_by_species[[state$species_ids[sp]]]
+      p_est <- p_est * niche_match(
+        list(temp = mean(clim$temp, na.rm = TRUE), relhum = relhum_mean),
+        niche_sp
+      )
 
       # Mask: valid landscape, not at capacity, has seeds
       can_est <- state$landscape[,,zi] &
@@ -911,6 +1016,37 @@ plot_3d_abundance <- function(result, t = NULL) {
 
 # ── Spin-up ───────────────────────────────────────────────────────────────────
 
+# Founders: n_founders individuals per species (a fixed, decoupled count —
+# not tied to however many field observations that species happens to have),
+# placed at random canopy voxels whose local climate matches that species'
+# realized niche (see get_niche()/niche_match()). Previously founders were
+# placed only at the exact voxel of an observed individual, which failed
+# whenever the stochastic forest didn't happen to mark that exact voxel as
+# canopy — with a handful of observations per site, that could (and did)
+# place zero founders across every replicate, guaranteeing extinction before
+# the simulation even started, independent of any vital-rate parameter.
+# Falls back to unrestricted canopy placement if no voxel matches the niche
+# (species with too few observations to build one, or a niche too narrow for
+# this stochastic forest) so founder placement never silently fails.
+.niche_matching_canopy <- function(state, niche_sp) {
+  zDim <- state$zDim
+  height_ok <- vapply(seq_len(zDim), function(zi) {
+    clim <- state$clim_by_height[[zi]]
+    if (is.null(clim)) return(FALSE)
+    niche_match(list(temp   = mean(clim$temp,   na.rm = TRUE),
+                     relhum = mean(clim$relhum, na.rm = TRUE),
+                     precip = mean(clim$precip, na.rm = TRUE)),
+                niche_sp) >= 1
+  }, logical(1))
+
+  candidate_list <- lapply(which(height_ok), function(zi) {
+    xy <- which(state$landscape[, , zi], arr.ind = TRUE)
+    if (nrow(xy) == 0) return(NULL)
+    cbind(xy, z = zi)
+  })
+  do.call(rbind, Filter(Negate(is.null), candidate_list))
+}
+
 run_spinup <- function(state, n_gens = 5, Visualize = TRUE,
                        carCap = 1, sleeptime = 0.2, visualize_dispersion = FALSE) {
   p <- state$params
@@ -923,18 +1059,32 @@ run_spinup <- function(state, n_gens = 5, Visualize = TRUE,
   size_A   <- array(p$z_A_min, dim=c(xDim, yDim, zDim, n_gens, n_species))
   totalS   <- numeric(n_gens); totalJ <- numeric(n_gens); totalA <- numeric(n_gens)
 
-  for (i in 1:nrow(state$site_obs)) {
-    idx <- state$coord_to_idx(state$site_obs$lon[i], state$site_obs$lat[i],
-                              state$site_obs$Height_m[i])
-    x <- idx[1]; y <- idx[2]; z <- idx[3]
-    sp <- state$sp_index[state$site_obs$FinalID[i]]
-    if (x >= 1 && x <= xDim && y >= 1 && y <= yDim && state$landscape[x, y, z]) {
-      spinupA[x, y, z, 1, sp] <- 1L
+  n_founders <- if (!is.null(p$n_founders)) p$n_founders else 30
+
+  for (sp in seq_len(n_species)) {
+    sp_name    <- state$species_ids[sp]
+    niche_sp   <- state$niches_by_species[[sp_name]]
+    candidates <- .niche_matching_canopy(state, niche_sp)
+    if (is.null(candidates) || nrow(candidates) == 0) {
+      log_msg(sprintf(
+        "Spin-up: no niche-matching canopy for %s, falling back to unrestricted placement", sp_name))
+      candidates <- which(state$landscape, arr.ind = TRUE)
+    }
+    if (nrow(candidates) == 0) {
+      log_msg(sprintf("Spin-up: no canopy at all for %s -- 0 founders placed", sp_name))
+      next
+    }
+
+    chosen <- candidates[sample.int(nrow(candidates), n_founders,
+                                    replace = nrow(candidates) < n_founders), , drop = FALSE]
+    for (k in seq_len(nrow(chosen))) {
+      x <- chosen[k, 1]; y <- chosen[k, 2]; z <- chosen[k, 3]
+      spinupA[x, y, z, 1, sp] <- spinupA[x, y, z, 1, sp] + 1L
       size_A[x, y, z, 1, sp]  <- p$z_A_min
     }
   }
-  log_msg(sprintf("Spin-up: placed %d observed individuals (%d species)",
-                  sum(spinupA[,,,1,]), n_species))
+  log_msg(sprintf("Spin-up: placed %d founders/species x %d species = %d total",
+                  n_founders, n_species, n_founders * n_species))
 
   fruited <- array(FALSE, dim=c(xDim, yDim, zDim, n_species))
   Disp    <- NULL
@@ -985,7 +1135,7 @@ runcolonization <- function(site, niches, canopy_grid, microenv,
                             Visualize=TRUE, sleeptime=0.2,
                             visualize_dispersion=FALSE, spinup=5,
                             parameters, forestparams=NULL, allsites=FALSE,
-                            train_frac=0.70, seed=42) {
+                            train_frac=0.70, seed=42, clim_cache=NULL) {
   set.seed(seed)
 
   # Per-species train/validation split — train_frac of observations per species
@@ -1001,7 +1151,8 @@ runcolonization <- function(site, niches, canopy_grid, microenv,
 
   state     <- init_colonization(site, niches_train, canopy_grid, microenv,
                                  resolution, carCap, maxDisp, params=parameters,
-                                 forestparams=forestparams, allsites=allsites)
+                                 forestparams=forestparams, allsites=allsites,
+                                 clim_cache=clim_cache)
   xDim      <- state$xDim; yDim <- state$yDim; zDim <- state$zDim
   n_species <- state$n_species
   abundanceS      <- array(0L,          dim=c(xDim, yDim, zDim, timesteps, n_species))
@@ -1060,7 +1211,7 @@ runcolonization <- function(site, niches, canopy_grid, microenv,
        obs_train=niches_train, obs_val=niches_val)
 }
 
-run_one <- function(params, tag = "run", timesteps = 20, spinup = 3) {
+run_one <- function(params, tag = "run", timesteps = 20, spinup = 3, clim_cache = NULL) {
   tryCatch(
     runcolonization(
       site         = site,
@@ -1074,9 +1225,22 @@ run_one <- function(params, tag = "run", timesteps = 20, spinup = 3) {
       spinup       = spinup,
       Visualize    = FALSE,
       parameters   = params,
-      forestparams = forestparams
+      forestparams = forestparams,
+      clim_cache   = clim_cache
     ),
-    error = function(e) { message("ERROR [", tag, "]: ", e$message); NULL }
+    error = function(e) {
+      # run_experiment() wraps this call in suppressMessages(), so a plain
+      # message() here would vanish with no trace anywhere. Write directly
+      # to the shared log file (defined by the caller, e.g.
+      # run_colonization_onesite.R) so failed workers are still visible.
+      err_line <- sprintf("ERROR [%s]: %s", tag, e$message)
+      message(err_line)
+      if (exists("log_file", inherits = TRUE)) {
+        cat(paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", err_line, "\n"),
+            file = log_file, append = TRUE)
+      }
+      NULL
+    }
   )
 }
 
@@ -1091,13 +1255,20 @@ run_experiment <- function(param_name, values, base = base_params,
   cat(sprintf("\n====== %s (%d jobs on %d cores) ======\n",
               param_name, nrow(jobs), N_CORES))
 
+  # Climate is identical across every value/rep in this sweep (only the
+  # biological parameter differs) — build the per-height lookup table once
+  # here, before mclapply forks, so all workers inherit it via copy-on-write
+  # instead of every one of them re-reading every height's raster from disk.
+  cat("Pre-computing shared climate lookup table for the sweep...\n")
+  clim_cache <- build_clim_cache(microenv)
+
   rows <- mclapply(seq_len(nrow(jobs)), function(i) {
     val <- jobs$val[i]; rep <- jobs$rep[i]
     p   <- base; p[[param_name]] <- val
     # Suppress log_msg inside workers
     suppressMessages(
       r <- run_one(p, tag = sprintf("%s=%s rep%d", param_name, val, rep),
-                   timesteps = timesteps, spinup = spinup)
+                   timesteps = timesteps, spinup = spinup, clim_cache = clim_cache)
     )
     if (is.null(r)) return(NULL)
     T <- timesteps
@@ -1112,6 +1283,57 @@ run_experiment <- function(param_name, values, base = base_params,
 
   df <- do.call(rbind, Filter(Negate(is.null), rows))
   df$param_value <- factor(df$param_value, levels = as.character(values))
+  cat(sprintf("  Done: %d/%d runs succeeded\n",
+              length(Filter(Negate(is.null), rows)), nrow(jobs)))
+  df
+}
+
+# ── Factorial experiment runner ────────────────────────────────────────────────
+# Crosses several parameters at once (unlike run_experiment(), which varies
+# only one). `param_values` is a named list, e.g.
+#   list(p_poll = c(...), p_germ = c(...), p_s1 = c(...))
+# giving length(p_poll) x length(p_germ) x length(p_s1) x n_reps jobs.
+# Returns a tidy data frame of S/J/A totals over time, with one column per
+# swept parameter recording the value used in that run.
+run_factorial_experiment <- function(param_values, base = base_params,
+                                     n_reps = 1, timesteps = 20, spinup = 3) {
+  param_names <- names(param_values)
+  jobs <- do.call(expand.grid,
+                  c(param_values, list(rep = seq_len(n_reps)), stringsAsFactors = FALSE))
+  cat(sprintf("\n====== factorial %s (%d combos x %d reps = %d jobs on %d cores) ======\n",
+              paste(param_names, collapse = " x "),
+              nrow(jobs) / n_reps, n_reps, nrow(jobs), N_CORES))
+
+  # Climate doesn't depend on any of the swept parameters — build it once,
+  # before mclapply forks, same reasoning as run_experiment().
+  cat("Pre-computing shared climate lookup table for the factorial...\n")
+  clim_cache <- build_clim_cache(microenv)
+
+  rows <- mclapply(seq_len(nrow(jobs)), function(i) {
+    p <- base
+    for (nm in param_names) p[[nm]] <- jobs[[nm]][i]
+    tag <- paste(sprintf("%s=%s", param_names,
+                         sapply(param_names, function(nm) jobs[[nm]][i])),
+                collapse = " ")
+    tag <- paste0(tag, sprintf(" rep%d", jobs$rep[i]))
+    suppressMessages(
+      r <- run_one(p, tag = tag, timesteps = timesteps, spinup = spinup,
+                  clim_cache = clim_cache)
+    )
+    if (is.null(r)) return(NULL)
+    T <- timesteps
+    df <- data.frame(
+      rep = jobs$rep[i], t = 1:T,
+      totalS = r$totalabundanceS, totalJ = r$totalabundanceJ,
+      totalA = r$totalabundanceA,
+      total  = r$totalabundanceS + r$totalabundanceJ + r$totalabundanceA,
+      extinct = all(r$totalabundanceA[(T %/% 2):T] == 0)
+    )
+    for (nm in param_names) df[[nm]] <- jobs[[nm]][i]
+    df
+  }, mc.cores = N_CORES)
+
+  df <- do.call(rbind, Filter(Negate(is.null), rows))
   cat(sprintf("  Done: %d/%d runs succeeded\n",
               length(Filter(Negate(is.null), rows)), nrow(jobs)))
   df

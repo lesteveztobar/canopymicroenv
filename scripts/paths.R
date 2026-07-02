@@ -21,6 +21,6 @@ LOGS_DIR      <- file.path(BASE_DIR, "logs")
 
 # create all directories if they don't exist
 # showWarnings = FALSE silently skips dirs that already exist
-for (d in c(RAW_DIR, CSV_DIR, PROCESSED_DIR, SCRIPTS_DIR, OUTPUT_DIR, LOGS_DIR)) {
+for (d in c(RAW_DIR, CSV_DIR, PROCESSED_DIR, PARAMS_DIR, SCRIPTS_DIR, OUTPUT_DIR, LOGS_DIR)) {
   dir.create(d, recursive = TRUE, showWarnings = FALSE)
 }

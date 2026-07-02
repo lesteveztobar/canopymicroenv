@@ -22,7 +22,8 @@ export LD_PRELOAD="/home/s38leste_hpc/.conda/envs/canopy_rgee/lib/libcrypto.so.3
 export CANOPY_PYTHON="/home/s38leste_hpc/.conda/envs/canopy_rgee/bin/python"
 
 SITE=$1      # e.g. "Maquipucuna"
-N_MONTHS=${2:-1}  # months of ERA5 to fetch backwards from tme_end (default: 1)
+N_MONTHS=${2:-12}  # months of ERA5 to fetch backwards from tme_end (default: 12, matches run_microclimate_site.R's own default and the rest of the pipeline's annual climate resolution)
+HEIGHT_STEP=${3:-0.1}  # m between height tiers (default: 0.1, production resolution)
 
 # Allocate (or find existing) Lustre workspace for per-height temp files.
 # ws_allocate is idempotent: calling it again returns the same path.
@@ -31,4 +32,4 @@ echo "Scratch workspace: $CANOPY_SCRATCH"
 
 cd /home/$USER/canopymicroenv
 $CANOPY_PYTHON -c "import ee; print('ee import OK')" 2>&1
-Rscript scripts/run_microclimate_site.R "$SITE" "$N_MONTHS"
+Rscript scripts/run_microclimate_site.R "$SITE" "$N_MONTHS" "$HEIGHT_STEP"

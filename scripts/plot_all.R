@@ -28,6 +28,11 @@ for (site in SITES) {
   }
 }
 
+cat("\n== Reproduction factorial (p_poll x p_germ x p_s1) ==\n")
+for (site in SITES) {
+  plot_factorial_experiment(site, "reproduction_factorial")
+}
+
 cat("\n== Default (unswept) colonization runs ==\n")
 for (site in SITES) {
   plot_default_colonization_run(site)

@@ -10,7 +10,7 @@
 #SBATCH --output=/home/s38leste_hpc/canopymicroenv/logs/log_array_%j.out
 
 SITES=("Maquipucuna" "Mashpi" "MindoTarabita" "MiradorMindo" "Yanayacu")
-N_MONTHS=${1:-1}  # e.g. sbatch microenv_array.sh 12
+N_MONTHS=${1:-12}  # e.g. sbatch microenv_array.sh 12
 
 for i in "${!SITES[@]}"; do
   sbatch /home/$USER/canopymicroenv/scripts/run_microenv.sh "${SITES[$i]}" "$N_MONTHS"

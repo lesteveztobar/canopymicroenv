@@ -4,11 +4,11 @@
 #
 #SBATCH --partition=lm_short
 #SBATCH --account=ag_biob_scabral
-#SBATCH --time=00:30:00
+#SBATCH --time=08:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=256G
 #SBATCH --output=/home/s38leste_hpc/canopymicroenv/logs/log_%j.out
 
 module purge

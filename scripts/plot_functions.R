@@ -399,7 +399,9 @@ EXP_PARAM_MAP <- c(
   germination_probability   = "p_germ",
   reproduction_cost         = "cost_repro",
   climate_sensitivity_rh    = "beta_rh",
-  precipitation_sensitivity = "beta_precip"
+  precipitation_sensitivity = "beta_precip",
+  niche_tolerance           = "niche_pad",
+  founder_number            = "n_founders"
 )
 
 plot_colonization_experiment <- function(site_name, exp_tag, out_dir = OUTPUT_DIR,
@@ -415,12 +417,64 @@ plot_colonization_experiment <- function(site_name, exp_tag, out_dir = OUTPUT_DI
             " -- single-run result, use plot_default_colonization_run() instead")
     return(invisible(NULL))
   }
+  if (!"param_value" %in% names(result)) {
+    message("Skipping ", site_name, " / ", exp_tag,
+            " -- factorial result (no param_value column), use plot_factorial_experiment() instead")
+    return(invisible(NULL))
+  }
 
   param_name <- EXP_PARAM_MAP[[exp_tag]] %||% exp_tag
   p <- plot_experiment(result, param_name,
                        title = sprintf("Effect of %s — %s", param_name, site_name))
 
   out_path <- file.path(out_dir, sprintf("experiment_%s_%s.png", site_name, exp_tag))
+  ggsave(out_path, plot = p, width = 12, height = 5, dpi = 300, bg = "white")
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# ── Factorial experiment (reproduction: p_poll x p_germ x p_s1) ────────────────
+# Extinction-rate heatmap across two swept parameters, faceted by the third —
+# mirrors the simple model's Fig. 5 (report.pdf sec. 3.3), but for the full
+# model's p_poll x p_germ x p_s1 factorial from run_factorial_experiment().
+plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factorial",
+                                      out_dir = OUTPUT_DIR, processed_dir = PROCESSED_DIR) {
+  in_path <- file.path(processed_dir, sprintf("colonization_%s_%s.rds", site_name, exp_tag))
+  if (!file.exists(in_path)) {
+    message("Skipping ", site_name, " / ", exp_tag, " -- no results at ", in_path)
+    return(invisible(NULL))
+  }
+  result <- readRDS(in_path)
+  if (!is.data.frame(result) || "param_value" %in% names(result)) {
+    message("Skipping ", site_name, " / ", exp_tag,
+            " -- not a factorial result, use plot_colonization_experiment() instead")
+    return(invisible(NULL))
+  }
+  swept <- intersect(c("p_poll", "p_germ", "p_s1"), names(result))
+  if (length(swept) < 2) {
+    message("Skipping ", site_name, " / ", exp_tag,
+            " -- fewer than 2 swept columns found (", paste(swept, collapse = ", "), ")")
+    return(invisible(NULL))
+  }
+
+  t_max <- max(result$t)
+  final <- result[result$t == t_max, ]
+  form  <- as.formula(paste("cbind(extinct, total) ~", paste(swept, collapse = " + ")))
+  combo_summary <- aggregate(form, data = final, FUN = mean)
+
+  x_var <- swept[1]; y_var <- swept[2]; facet_var <- swept[3]
+  p <- ggplot(combo_summary,
+             aes(x = factor(.data[[x_var]]), y = factor(.data[[y_var]]), fill = extinct)) +
+    geom_tile() +
+    scale_fill_gradientn(colours = c("#08519c", "#f1a340", "#a50026"),
+                         limits = c(0, 1), name = "Extinction\nrate") +
+    labs(x = x_var, y = y_var,
+         title = sprintf("Reproduction factorial — %s", site_name),
+         subtitle = sprintf("Extinction rate at year %d, faceted by %s", t_max, facet_var)) +
+    theme_minimal(base_size = 11)
+  if (!is.na(facet_var)) p <- p + facet_wrap(as.formula(paste("~", facet_var)), labeller = label_both)
+
+  out_path <- file.path(out_dir, sprintf("factorial_%s_%s.png", site_name, exp_tag))
   ggsave(out_path, plot = p, width = 12, height = 5, dpi = 300, bg = "white")
   message("Saved: ", out_path)
   invisible(p)

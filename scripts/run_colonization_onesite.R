@@ -119,36 +119,59 @@ if (!is.null(params_file) && file.exists(params_file)) {
     # ── p_r(z) × f_s(z): fecundity ──────────────────────────────────────
     p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
     # ── d(x'|x): dispersal ──────────────────────────────────────────────
-    canopy_z = mean_canopy,  lambda = 1,  Ut = 1
+    canopy_z = mean_canopy,  lambda = 1,  Ut = 1,
+    # ── spin-up ────────────────────────────────────────────────────────────
+    # Founders per species, decoupled from however many field observations
+    # that species has (see get_colonization.R::run_spinup()). Note: even at
+    # the most generous swept p_poll/p_germ/p_s1 combination, expected seed
+    # output is ~0.001/adult/year at founder size (z=z_A_min) — with only
+    # ~30 founders that's still under 1 expected seed/year, so this may need
+    # to go higher once real run results come back thin.
+    n_founders = 30,
+    # Realized climate niche tolerance (see get_niche()/niche_match()); 0 =
+    # raw observed range, no padding.
+    niche_pad = 0
   )
 }
 # canopy_z is site-specific (mean canopy height); always set it from this
 # site's observations, overriding whatever a shared sensitivity-experiment
 # params file may have carried.
 params$canopy_z <- mean_canopy
+if (is.null(params$n_founders)) params$n_founders <- 30
+if (is.null(params$niche_pad))  params$niche_pad  <- 0
 
 # ── 6. Sanity check ───────────────────────────────────────────────────────────
 clim_test <- get_clim(available_heights[1], microenv)
 stopifnot(
   is.data.frame(clim_test),
-  nrow(clim_test) == 48,
-  all(c("temp", "relhum", "windspeed", "swdown", "precip", "winddir") %in% names(clim_test))
+  nrow(clim_test) > 0,
+  nrow(clim_test) %% 24 == 0,
+  all(c("month", "temp", "relhum", "windspeed", "swdown", "precip", "winddir") %in% names(clim_test))
 )
 log_msg(sprintf("Climate check passed: %.1f°C mean temp, %.0f mm/yr precip",
   mean(clim_test$temp, na.rm = TRUE),
   mean(clim_test$precip, na.rm = TRUE) * 8760))
 
 # ── 7. Run colonization model ─────────────────────────────────────────────────
-# A sensitivity-experiment params file has exactly one vector-valued field —
-# sweep it with run_experiment(); a plain params file (or the literature
-# defaults) has none, so run the model once via runcolonization().
-swept_param <- names(params)[vapply(params, length, integer(1)) > 1]
-if (length(swept_param) > 1) {
-  stop(sprintf("params file has more than one vector-valued field: %s",
-               paste(swept_param, collapse = ", ")))
-}
+# A one-at-a-time sensitivity params file has exactly one vector-valued
+# field — sweep it with run_experiment(). A factorial params file (e.g.
+# make_params.R's reproduction factorial) has several — cross them with
+# run_factorial_experiment(). A plain params file (or literature defaults)
+# has none, so run the model once via runcolonization().
+swept_params <- names(params)[vapply(params, length, integer(1)) > 1]
 
-if (length(swept_param) == 1) {
+if (length(swept_params) > 1) {
+  N_CORES <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", NA)))
+  if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
+  N_REPS <- 1  # replicates per combo — factorials get large fast (see paper's 729-combo x1 design)
+  param_values <- setNames(lapply(swept_params, function(nm) params[[nm]]), swept_params)
+  n_combos <- prod(vapply(param_values, length, integer(1)))
+  log_msg(sprintf("Factorial sweep %s: %d combos x %d reps on %d cores...",
+                  paste(swept_params, collapse = " x "), n_combos, N_REPS, N_CORES))
+  result <- run_factorial_experiment(param_values, base = params,
+                                     n_reps = N_REPS, timesteps = 30, spinup = 5)
+} else if (length(swept_params) == 1) {
+  swept_param <- swept_params
   N_CORES <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", NA)))
   if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
   N_REPS <- 3  # replicates per swept value
@@ -183,8 +206,11 @@ log_msg(sprintf("Done. Results saved to %s", out_path))
 
 # ── 8. Plots (interactive only) ───────────────────────────────────────────────
 if (interactive()) {
-  if (is.data.frame(result)) {
-    print(plot_experiment(result, swept_param))
+  if (is.data.frame(result) && length(swept_params) == 1) {
+    print(plot_experiment(result, swept_params))
+  } else if (is.data.frame(result)) {
+    message("Factorial result — no dedicated plot yet; inspect the data frame directly ",
+            "(columns: ", paste(swept_params, collapse = ", "), ", t, totalS/J/A, extinct).")
   } else {
     plot_abundance(result)
     plot_3d_abundance(result)

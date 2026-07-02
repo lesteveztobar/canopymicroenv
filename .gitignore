@@ -27,6 +27,7 @@ credentials.rds
 # --- Keep folder structure ---
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+!data/params/.gitkeep
 !output/.gitkeep
 !figures/.gitkeep
 .positai
@@ -44,3 +45,6 @@ geojson-csv-sql-conversion-tools
 # --- Simple model files ---
 scripts/simple_experiments.R
 scripts/simple_colonization.R
+
+# --- Params files ---
+data/params/*

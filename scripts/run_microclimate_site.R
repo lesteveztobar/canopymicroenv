@@ -4,9 +4,15 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) == 0) stop("Usage: Rscript run_microclimate_site.R <SiteName> [n_months]")
+if (length(args) == 0) stop("Usage: Rscript run_microclimate_site.R <SiteName> [n_months] [height_step]")
 TARGET_SITE <- args[1]
 N_MONTHS    <- if (length(args) >= 2) as.integer(args[2]) else 12L
+# Vertical spacing (m) between height tiers. Default 0.1 matches production
+# sites. A coarser step (e.g. 0.5) is for the height-resolution efficiency
+# diagnostic — it reuses the cached weather/DTM/point-model data (those don't
+# depend on height spacing) and only redoes the per-height loop below, so
+# testing a coarser resolution is proportionally cheaper, not free.
+HEIGHT_STEP <- if (length(args) >= 3) as.numeric(args[3]) else 0.1
 
 source("scripts/patches.R")
 library(rgee)
@@ -59,7 +65,11 @@ for (d in c(site_dir, site_dtm_dir, site_soil_dir,
             site_era5_dir, site_alb_dir, site_lcover_dir, site_lai_dir))
   dir.create(d, recursive = TRUE, showWarnings = FALSE)
 
-site_env_path   <- file.path(PROCESSED_DIR, sprintf("microenv_%s.rds",   site$Site))
+# Resolution-suffixed file names only kick in for a non-default height step,
+# so production (0.1m) runs keep their original, unsuffixed file names and
+# coarser diagnostic runs never collide with or overwrite them.
+res_suffix      <- if (HEIGHT_STEP != 0.1) sprintf("_h%.2f", HEIGHT_STEP) else ""
+site_env_path   <- file.path(PROCESSED_DIR, sprintf("microenv_%s%s.rds", site$Site, res_suffix))
 site_model_path <- file.path(PROCESSED_DIR, sprintf("pointmodel_%s.rds", site$Site))
 
 # Per-height temp files go to Lustre scratch (set via CANOPY_SCRATCH in hpc_job.sh).
@@ -154,8 +164,8 @@ log_msg("Subsetting point model to monthly max/min days...")
 micropoint_mx <- microclimf::subsetpointmodela(model, tstep = "month", what = "tmax")
 micropoint_mn <- microclimf::subsetpointmodela(model, tstep = "month", what = "tmin")
 
-heights    <- seq(0.1, site$hObs_max, by = 0.1)
-height_dir <- file.path(scratch_base, sprintf("microenv_%s_heights", site$Site))
+heights    <- seq(0.1, site$hObs_max, by = HEIGHT_STEP)
+height_dir <- file.path(scratch_base, sprintf("microenv_%s%s_heights", site$Site, res_suffix))
 dir.create(height_dir, recursive = TRUE, showWarnings = FALSE)
 
 era5_template <- terra::rast(weatherdata[[1]])[[1]]
