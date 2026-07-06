@@ -65,16 +65,22 @@ make_sites <- function(csv_path, pad = 0.01) {
     ) |>
     dplyr::group_by(Area_or_Site) |>
     dplyr::summarise(
-      lat_min   = min(lat)      - pad,
-      lat_max   = max(lat)      + pad,
-      lon_min   = min(lon)      - pad,
-      lon_max   = max(lon)      + pad,
-      tme_start = min(datetime),
-      tme_end   = max(datetime),
-      hObs_min  = min(Height_m, na.rm = TRUE),
-      hObs_max  = max(Height_m, na.rm = TRUE),
-      .groups   = "drop"
+      lat_min     = min(lat)      - pad,
+      lat_max     = max(lat)      + pad,
+      lon_min     = min(lon)      - pad,
+      lon_max     = max(lon)      + pad,
+      tme_start   = min(datetime),
+      tme_end     = max(datetime),
+      hObs_min    = min(Height_m, na.rm = TRUE),
+      hObs_max    = max(Height_m, na.rm = TRUE),
+      # Measured canopy height at this site, for the model's height ceiling
+      # (run_microclimate_site.R) — NA (via suppressWarnings on an all-NA
+      # max()) if no CanopyHeight_m records exist here, in which case that
+      # script falls back to the vhgt.tif remote-sensing raster instead.
+      hCanopy_max = suppressWarnings(max(CanopyHeight_m, na.rm = TRUE)),
+      .groups     = "drop"
     ) |>
+    dplyr::mutate(hCanopy_max = ifelse(is.finite(hCanopy_max), hCanopy_max, NA_real_)) |>
     dplyr::rename(Site = Area_or_Site)
 }
 

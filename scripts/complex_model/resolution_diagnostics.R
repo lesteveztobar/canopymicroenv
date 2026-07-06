@@ -9,19 +9,19 @@
 # or microenv_<site>_h<step>.rds (coarser steps, from height_res_array.sh) to
 # already exist — this script does NOT generate microclimate data itself.
 #
-# Usage: Rscript scripts/resolution_diagnostics.R <site> [height_steps] [horiz_resolutions]
-#   e.g.: Rscript scripts/resolution_diagnostics.R Maquipucuna "0.1,0.25,0.5,1.0" "5,10,20,40"
+# Usage: Rscript scripts/complex_model/resolution_diagnostics.R <site> [height_steps] [horiz_resolutions]
+#   e.g.: Rscript scripts/complex_model/resolution_diagnostics.R Maquipucuna "0.1,0.25,0.5,1.0" "5,10,20,40"
 # Output: output/resolution_diagnostics_<site>.csv
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 library(parallel)
-source("scripts/paths.R")
-source("scripts/get_colonization.R")
+source("scripts/complex_model/paths.R")
+source("scripts/complex_model/get_colonization.R")
 
 args <- commandArgs(trailingOnly = TRUE)
 site_name  <- if (length(args) >= 1) args[1] else "Maquipucuna"
-height_steps <- if (length(args) >= 2) as.numeric(strsplit(args[2], ",")[[1]]) else c(0.1, 0.25, 0.5, 1.0)
-horiz_res    <- if (length(args) >= 3) as.numeric(strsplit(args[3], ",")[[1]]) else c(5, 10, 20, 40)
+height_steps <- if (length(args) >= 2 && nzchar(args[2])) as.numeric(strsplit(args[2], ",")[[1]]) else c(0.1, 0.25, 0.5, 1.0)
+horiz_res    <- if (length(args) >= 3 && nzchar(args[3])) as.numeric(strsplit(args[3], ",")[[1]]) else c(5, 10, 20, 40)
 DIAG_TIMESTEPS <- 5   # short run — timing only, not meant to be scientifically meaningful
 DIAG_SPINUP    <- 2
 

@@ -25,8 +25,8 @@ library(scico)
 library(abind)
 library(scatterplot3d)
 
-source("scripts/paths.R")
-source("scripts/get_colonization.R")
+source("scripts/complex_model/paths.R")
+source("scripts/complex_model/get_colonization.R")
 
 # ── Field site map ─────────────────────────────────────────────────────────────
 # NW Ecuador Maxillariinae field sites, from GeoJSON transects/points.
@@ -433,10 +433,14 @@ plot_colonization_experiment <- function(site_name, exp_tag, out_dir = OUTPUT_DI
   invisible(p)
 }
 
-# ── Factorial experiment (reproduction: p_poll x p_germ x p_s1) ────────────────
-# Extinction-rate heatmap across two swept parameters, faceted by the third —
-# mirrors the simple model's Fig. 5 (report.pdf sec. 3.3), but for the full
-# model's p_poll x p_germ x p_s1 factorial from run_factorial_experiment().
+# ── Factorial experiment (e.g. n_founders x p_poll x p_germ x p_s1) ────────────
+# Extinction-rate heatmap across two swept parameters, faceted by however many
+# more are present — generalizes to any factorial from run_factorial_experiment(),
+# not just a specific 3- or 4-parameter design. Swept columns are detected as
+# whatever's left after removing the fixed output columns, with n_founders
+# (if present) placed on the primary x-axis since it's usually the parameter
+# of most direct interest. Mirrors the simple model's Fig. 5 (report.pdf
+# sec. 3.3), generalized past a single facet variable via facet_grid.
 plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factorial",
                                       out_dir = OUTPUT_DIR, processed_dir = PROCESSED_DIR) {
   in_path <- file.path(processed_dir, sprintf("colonization_%s_%s.rds", site_name, exp_tag))
@@ -450,7 +454,9 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
             " -- not a factorial result, use plot_colonization_experiment() instead")
     return(invisible(NULL))
   }
-  swept <- intersect(c("p_poll", "p_germ", "p_s1"), names(result))
+  fixed_cols <- c("rep", "t", "totalS", "totalJ", "totalA", "total", "extinct")
+  swept <- setdiff(names(result), fixed_cols)
+  if ("n_founders" %in% swept) swept <- c("n_founders", setdiff(swept, "n_founders"))
   if (length(swept) < 2) {
     message("Skipping ", site_name, " / ", exp_tag,
             " -- fewer than 2 swept columns found (", paste(swept, collapse = ", "), ")")
@@ -462,20 +468,35 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
   form  <- as.formula(paste("cbind(extinct, total) ~", paste(swept, collapse = " + ")))
   combo_summary <- aggregate(form, data = final, FUN = mean)
 
-  x_var <- swept[1]; y_var <- swept[2]; facet_var <- swept[3]
+  x_var <- swept[1]; y_var <- swept[2]
+  facet_vars <- swept[-(1:2)]
+
   p <- ggplot(combo_summary,
              aes(x = factor(.data[[x_var]]), y = factor(.data[[y_var]]), fill = extinct)) +
     geom_tile() +
     scale_fill_gradientn(colours = c("#08519c", "#f1a340", "#a50026"),
                          limits = c(0, 1), name = "Extinction\nrate") +
     labs(x = x_var, y = y_var,
-         title = sprintf("Reproduction factorial — %s", site_name),
-         subtitle = sprintf("Extinction rate at year %d, faceted by %s", t_max, facet_var)) +
+         title = sprintf("Factorial — %s", site_name),
+         subtitle = if (length(facet_vars) > 0)
+           sprintf("Extinction rate at year %d, faceted by %s",
+                   t_max, paste(facet_vars, collapse = " x "))
+         else
+           sprintf("Extinction rate at year %d", t_max)) +
     theme_minimal(base_size = 11)
-  if (!is.na(facet_var)) p <- p + facet_wrap(as.formula(paste("~", facet_var)), labeller = label_both)
+
+  if (length(facet_vars) == 1) {
+    p <- p + facet_wrap(as.formula(paste("~", facet_vars[1])), labeller = label_both)
+  } else if (length(facet_vars) >= 2) {
+    p <- p + facet_grid(as.formula(paste(facet_vars[1], "~", facet_vars[2])), labeller = label_both)
+    if (length(facet_vars) > 2)
+      message("Note: faceting by ", facet_vars[1], " and ", facet_vars[2],
+              " only; ", paste(facet_vars[-(1:2)], collapse = ", "),
+              " collapsed via aggregation.")
+  }
 
   out_path <- file.path(out_dir, sprintf("factorial_%s_%s.png", site_name, exp_tag))
-  ggsave(out_path, plot = p, width = 12, height = 5, dpi = 300, bg = "white")
+  ggsave(out_path, plot = p, width = 12, height = 8, dpi = 300, bg = "white")
   message("Saved: ", out_path)
   invisible(p)
 }
@@ -483,7 +504,8 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
 # ── Single default colonization run (no swept parameter) ───────────────────────
 plot_default_colonization_run <- function(site_name, exp_tag = "default",
                                            out_dir = OUTPUT_DIR,
-                                           processed_dir = PROCESSED_DIR) {
+                                           processed_dir = PROCESSED_DIR,
+                                           animate = TRUE) {
   in_path <- file.path(processed_dir, sprintf("colonization_%s_%s.rds", site_name, exp_tag))
   if (!file.exists(in_path)) {
     message("Skipping ", site_name, " / ", exp_tag, " -- no results at ", in_path)
@@ -495,19 +517,41 @@ plot_default_colonization_run <- function(site_name, exp_tag = "default",
             " -- sweep result, use plot_colonization_experiment() instead")
     return(invisible(NULL))
   }
+  # run_replicated() output: list(runs = <one runcolonization() per
+  # replicate>, summary = <tidy data frame>). Falls back to treating `result`
+  # itself as a single run for any older RDS saved before that change.
+  runs <- if (is.list(result) && !is.null(result$runs)) result$runs else list(result)
+  runs <- Filter(Negate(is.null), runs)
+  if (length(runs) == 0) {
+    message("Skipping ", site_name, " / ", exp_tag, " -- no successful replicates")
+    return(invisible(NULL))
+  }
+  message(length(runs), " replicate(s) found for ", site_name, " / ", exp_tag)
 
-  abundance_path <- file.path(out_dir, sprintf("abundance_%s_%s.png", site_name, exp_tag))
-  png(abundance_path, width = 1800, height = 900, res = 150)
-  plot_abundance(result)
-  dev.off()
-  message("Saved: ", abundance_path)
+  saved <- lapply(seq_along(runs), function(i) {
+    suffix <- if (length(runs) > 1) sprintf("_rep%d", i) else ""
+    abundance_path <- file.path(out_dir, sprintf("abundance_%s_%s%s.png", site_name, exp_tag, suffix))
+    png(abundance_path, width = 1800, height = 900, res = 150)
+    plot_abundance(runs[[i]])
+    dev.off()
+    message("Saved: ", abundance_path)
+    abundance_path
+  })
 
-  fig_3d <- plot_3d_abundance(result)
+  # 3D: static snapshot (final year) + animated (all years) for the first
+  # replicate only, to avoid generating one large HTML per replicate by default.
+  fig_3d <- plot_3d_abundance(runs[[1]])
   volume_path <- file.path(out_dir, sprintf("abundance_3d_%s_%s.html", site_name, exp_tag))
   if (!is.null(fig_3d)) {
     htmlwidgets::saveWidget(fig_3d, volume_path, selfcontained = TRUE)
     message("Saved: ", volume_path)
   }
 
-  invisible(list(abundance_png = abundance_path, abundance_3d = fig_3d))
+  anim_path <- NULL
+  if (animate) {
+    anim_path <- file.path(out_dir, sprintf("abundance_3d_animated_%s_%s.html", site_name, exp_tag))
+    plot_3d_abundance_animated(runs[[1]], out_path = anim_path)
+  }
+
+  invisible(list(abundance_png = saved, abundance_3d = fig_3d, abundance_3d_animated = anim_path))
 }

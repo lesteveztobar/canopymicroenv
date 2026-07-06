@@ -4,10 +4,10 @@
 # pipeline — each function in plot_functions.R skips (with a message) if its
 # inputs aren't there yet, instead of erroring.
 #
-# Usage: sh scripts/run_plots.sh   (wraps: Rscript scripts/plot_all.R)
+# Usage: sh scripts/complex_model/run_plots.sh   (wraps: Rscript scripts/complex_model/plot_all.R)
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
-source("scripts/plot_functions.R")
+source("scripts/complex_model/plot_functions.R")
 
 SITES <- c("Maquipucuna", "Mashpi", "MindoTarabita", "MiradorMindo", "Yanayacu")
 EXP   <- names(EXP_PARAM_MAP)

@@ -9,7 +9,7 @@
 
 This repository contains the full analysis pipeline for my master's thesis on the **vertical stratification of epiphytic Maxillariinae orchids** and their microenvironmental correlates across five cloud forest sites in the Chocó Andino of northwestern Ecuador (Maquipucuna, MiradorMindo, Mashpi, MindoTarabita, Yanayacu).
 
-The core idea: instead of using coarse climate data to describe orchid habitat, this pipeline models the **exact microclimate at the height and location where each individual was observed** — at 0.1 m resolution across the full canopy vertical gradient. These microclimate profiles characterise the realised niche of each species and feed a **3D spatially explicit colonization model** that simulates population dynamics (dispersal, establishment, survival, growth) across the canopy landscape, driven by microclimate-based vital rates.
+The core idea: instead of using coarse climate data to describe orchid habitat, this pipeline models the **exact microclimate at the height and location where each individual was observed** — at 0.25 m resolution across the full canopy vertical gradient (justified against finer/coarser alternatives; see [Notes](#notes)). These microclimate profiles characterise the realised niche of each species and feed a **3D spatially explicit colonization model** that simulates population dynamics (dispersal, establishment, survival, growth) across the canopy landscape, driven by microclimate-based vital rates.
 
 > ⚠️ **Work in progress.** Microclimate pipeline complete for all 5 sites; colonization model and sensitivity experiments running. See [Status](#status).
 
@@ -35,26 +35,36 @@ GeoJSON field exports
         ↓
   data/csv/combinedv3.csv             # manually edited, merged dataset with final species IDs
         ↓
-  run_microclimate.R                  # interactive: all sites sequentially
-  run_microclimate_site.R             # HPC: single site via Rscript / SLURM
-    └── get_climateinputs.R           # ERA5 download + preprocessing
-    └── get_microenv.R                # vegetation · soil · runpointmodela()
-                                      # height loop: 0.1 m steps, per-height RDS to scratch
-  microenv_<site>.rds                 # manifest → data/processed/ (~350 KB)
-  /lustre/scratch/.../microenv_<site>_heights/  # per-height spatial arrays (~6 GB each)
+  scripts/run_microclimate.R          # interactive: all sites sequentially
+  scripts/run_microclimate_site.R     # HPC: single site via Rscript / SLURM
+    └── scripts/get_climateinputs.R   # ERA5 download + preprocessing
+    └── scripts/get_microenv.R        # vegetation · soil · runpointmodela()
+                                      # height loop: production 0.25 m steps, per-height RDS to scratch
+                                      # height ceiling: measured CanopyHeight_m → vhgt.tif p99 → hObs_max
+  microenv_<site>[_h<step>].rds       # manifest → data/processed/ (~1.4 MB)
+  /lustre/scratch/.../microenv_<site>[_h<step>]_heights/  # per-height spatial arrays
         ↓
-  run_colonization_onesite.R          # single-site colonization run
-  run_colonization_allsites.R         # all-sites loop (or SLURM array)
-    └── get_colonization.R            # build_forest() · dispersal · establishment
+  scripts/complex_model/characterize_niches.R  # pools each species' climate niche across every
+                                      # site it was observed at → data/processed/species_niches.rds
+        ↓
+  scripts/complex_model/run_colonization_onesite.R  # single-site colonization run
+  scripts/run_colonization_allsites.R  # all-sites loop (or SLURM array)
+    └── scripts/complex_model/get_colonization.R  # build_forest() · dispersal · establishment
                                       # survival/growth (IPM-style, equation primitives)
         ↓
-  make_params.R                       # build parameter sweep RDS files for experiments
-  batch_exp.sh / run_colonization.sh  # SLURM: 5 sites × 6 experiments in parallel
-  run_experiments.R                   # parallel sensitivity experiments (thesis model)
-  simple_colonization.R               # standalone 3D model without microclimate
-  simple_experiments.R                # sensitivity experiments for simple model
-  simple_model/run_extinction_heatmap.R  # fine-scale extinction threshold scan
-  plot_all.R / plot_functions.R       # all project figures in one pass
+  scripts/complex_model/make_params.R  # build parameter sweep RDS files for experiments
+                                      # (incl. best_case.rds — persistence validation, see Notes)
+  scripts/complex_model/batch_exp.sh / run_colonization.sh  # SLURM: 5 sites × experiments in parallel
+  scripts/run_experiments.R           # parallel sensitivity experiments (thesis model)
+  scripts/simple_colonization.R       # standalone 3D model without microclimate
+  scripts/simple_experiments.R        # sensitivity experiments for simple model
+  scripts/simple_model/run_extinction_heatmap.R  # fine-scale extinction threshold scan
+  scripts/complex_model/plot_all.R / plot_functions.R  # all project figures in one pass
+
+Resolution justification (before committing to full experiment runs):
+  scripts/complex_model/height_res_array.sh              # generate coarser height-step microenv variants
+  scripts/complex_model/run_resolution_diagnostics.sh     # timing only: cache-build + short run per resolution
+  scripts/complex_model/run_height_resolution_experiment.sh  # outcomes: full best_case runs per height step
 ```
 
 ---
@@ -81,11 +91,21 @@ The microclimate model is computationally intensive. Each site is submitted as a
 
 ```bash
 # From /home/s38leste_hpc/canopymicroenv/
-sbatch scripts/microenv_array.sh 12          # all 5 sites × 12 months of ERA5
-sbatch scripts/run_microenv.sh Maquipucuna 12  # single site
+sbatch scripts/microenv_array.sh 12 0.25          # all 5 sites × 12 months of ERA5, production 0.25 m
+sbatch scripts/run_microenv.sh Maquipucuna 12 0.25  # single site
+
+# Check microenv regeneration progress (read-only)
+Rscript scripts/check_microenv_progress.R Maquipucuna 0.1,0.25,0.5,1.0
+
+# Pool each species' climate niche across every site it was observed at
+sbatch scripts/complex_model/characterize_niches.sh
+
+# Resolution justification, before committing to full experiment runs
+sbatch scripts/complex_model/run_resolution_diagnostics.sh Maquipucuna        # timing only
+sbatch scripts/complex_model/run_height_resolution_experiment.sh Maquipucuna  # outcomes (best_case.rds)
 
 # Sensitivity experiments (after microclimate is done)
-sbatch scripts/batch_exp.sh                  # 5 sites × 6 experiments = 30 jobs
+sbatch scripts/complex_model/batch_exp.sh    # 5 sites × experiments
 
 # Test environment before a full run
 sbatch scripts/hpc_test.sh
@@ -93,7 +113,7 @@ sbatch scripts/hpc_test.sh
 
 Each microclimate job runs on the `lm_short` partition (large-memory nodes) with 4 CPUs and 500 GB RAM. It loads R/4.4.2, the Miniforge3 conda environment (`canopy_rgee`) for Earth Engine access, and allocates a Lustre scratch workspace for per-height temp files via `ws_allocate`. Logs are written to `logs/log_<jobid>.out`.
 
-**Lustre scratch workspace:** per-height `.rds` files (~6 GB each) are written to `/lustre/scratch/data/s38leste_hpc-canopymicroenv/microenv_<site>_heights/` during computation. The final `microenv_<site>.rds` in `data/processed/` is a small manifest (~350 KB) that records the height vector, scratch path, and baseline weather — not the full spatial arrays. **Do not release the scratch workspace** (`ws_release`) until downstream analysis is complete. The workspace expires in 90 days and can be extended up to 3 times.
+**Lustre scratch workspace:** per-height `.rds` files are written to `/lustre/scratch/data/s38leste_hpc-canopymicroenv/microenv_<site>[_h<step>]_heights/` during computation. The final `microenv_<site>[_h<step>].rds` in `data/processed/` is a small manifest (~1.4 MB) that records the height vector, scratch path, and baseline weather — not the full spatial arrays. **Do not release the scratch workspace** (`ws_release`) until downstream analysis is complete. The workspace expires in 90 days and can be extended up to 3 times.
 
 ---
 
@@ -105,13 +125,40 @@ canopymicroenv/
 │   │   # ── Microclimate pipeline ──────────────────────────────────────────
 │   ├── run_microclimate.R             # data acquisition + point model + grid model (interactive)
 │   ├── run_microclimate_site.R        # same, single site — called by SLURM
+│   ├── get_climateinputs.R            # ERA5 download + preprocessing, concat_era5_nc()
+│   ├── get_microenv.R                 # microenvironment functions: niche extraction,
+│   │                                  #   canopy grid, climate helpers, get_clim()
+│   ├── check_microenv_progress.R      # read-only: per-site/height-step regen progress
+│   ├── microenv_array.sh              # submit one microclimate job per site
+│   ├── microenv_helpers.R             # additional microenvironment utilities
 │   │
-│   │   # ── Colonization model ────────────────────────────────────────────
+│   │   # ── Complex (microclimate-driven) colonization model ──────────────
+│   ├── complex_model/
+│   │   ├── get_colonization.R         # colonization functions: build_forest(),
+│   │   │                              #   runcolonization(), pass1/2/3 sub-models,
+│   │   │                              #   survival_logit(), transition_logit(), size_increment(),
+│   │   │                              #   load_height(), run_experiment()/run_factorial_experiment()/
+│   │   │                              #   run_replicated(), plot_abundance()/plot_3d_abundance_animated()
+│   │   ├── run_colonization_onesite.R # colonization run: single site (interactive / SLURM)
+│   │   ├── make_params.R              # build parameter sweep RDS files, incl. best_case.rds
+│   │   │                              #   (persistence validation — see Notes)
+│   │   ├── characterize_niches.R/.sh  # pools each species' climate niche across every site
+│   │   │                              #   it was observed at → data/processed/species_niches.rds
+│   │   ├── check_niche_widths.R       # read-only: inspect per-species niche geometry
+│   │   ├── resolution_diagnostics.R/  # timing-only: climate-cache build + short run cost
+│   │   │   run_resolution_diagnostics.sh  #   across height/horizontal resolution combinations
+│   │   ├── height_resolution_experiment.R/  # outcomes: full best_case.rds runs at each height
+│   │   │   run_height_resolution_experiment.sh  #   step, to check resolution doesn't change results
+│   │   ├── height_res_array.sh        # generate coarser height-step microenv variants
+│   │   ├── batch_exp.sh / run_colonization.sh  # SLURM: sites × experiments in parallel
+│   │   ├── get_colonization.R helpers: helper_functions.R, patches.R, paths.R
+│   │   ├── plot_all.R / plot_functions.R  # all project figures in one pass
+│   │   └── check_colonization_progress.sh
+│   │
+│   │   # ── All-sites drivers (top level; reference complex_model/ internally) ──
 │   ├── allsites.R                     # all-sites run: load models, extract niches, run colonization
-│   ├── run_colonization_onesite.R     # colonization run: single site (interactive / SLURM)
 │   ├── run_colonization_allsites.R    # colonization loop: all sites
 │   ├── run_experiments.R              # sensitivity experiment driver (parallel, thesis model)
-│   ├── make_params.R                  # build parameter sweep RDS files for batch_exp.sh
 │   │
 │   │   # ── Simple / standalone model ─────────────────────────────────────
 │   ├── simple_colonization.R          # standalone 3D colonization model (no microclimate)
@@ -121,29 +168,11 @@ canopymicroenv/
 │   │   ├── run_experiments.R
 │   │   └── run_extinction_heatmap.R   # extinction threshold scan (p_est × repro_rate)
 │   │
-│   │   # ── Plotting ──────────────────────────────────────────────────────
-│   ├── plot_all.R                     # entry point: runs all project figures
-│   ├── plot_functions.R               # shared plotting helpers
+│   │   # ── Literature data ──────────────────────────────────────────────
+│   ├── get_literature_data/           # tooling to extract/organize literature-sourced trait data
 │   │
-│   │   # ── Function libraries ────────────────────────────────────────────
-│   ├── get_colonization.R             # colonization functions: build_forest(),
-│   │                                  #   runcolonization(), pass1/2/3 sub-models,
-│   │                                  #   survival_logit(), transition_logit(), size_increment(),
-│   │                                  #   load_height() (manifest-aware height loader)
-│   ├── get_microenv.R                 # microenvironment functions: niche extraction,
-│   │                                  #   canopy grid, climate helpers, get_clim()
-│   ├── get_climateinputs.R            # ERA5 download + preprocessing, concat_era5_nc()
-│   ├── microenv_helpers.R             # additional microenvironment utilities
-│   ├── helper_functions.R             # logging, coordinate parsing, DMS normalisation
-│   ├── patches.R                      # runtime monkey-patches for ecmwfr / microclimdata
-│   ├── paths.R                        # directory constants (BASE_DIR, RAW_DIR, PARAMS_DIR, …)
-│   │
-│   │   # ── SLURM scripts ─────────────────────────────────────────────────
-│   ├── microenv_array.sh              # submit one microclimate job per site
-│   ├── run_microenv.sh                # single-site microclimate job (lm_short, 4 CPUs, 500G)
-│   ├── batch_exp.sh                   # submit 5 sites × 6 experiments = 30 colonization jobs
-│   ├── run_colonization.sh            # single site × experiment colonization job (lm_short, 500G)
-│   ├── run_plots.sh                   # run plot_all.R (local or interactive node)
+│   │   # ── SLURM / environment scripts ────────────────────────────────────
+│   ├── run_plots.sh                   # run complex_model/plot_all.R (local or interactive node)
 │   ├── hpc_test.sh                    # connectivity / environment smoke test
 │   ├── test_env.R                     # R package + Python environment check
 │   │
@@ -161,12 +190,15 @@ canopymicroenv/
 │   └── csv/                           # per-site CSVs produced by convert_observations.py
 ├── data/
 │   ├── csv/                           # combined*.csv, Processed*.csv — observation datasets
+│   ├── literature/                    # literature-sourced trait/reference data
 │   ├── raw/                           # ERA5, DTM, LAI, albedo, etc. (not tracked)
-│   ├── params/                        # parameter sweep RDS files built by make_params.R
-│   └── processed/                     # microenv_*.rds (manifests, ~350 KB each),
-│                                      #   pointmodel_*.rds, colonization outputs (not tracked)
-│                                      #   NB: full per-height arrays (~6 GB each) live in Lustre scratch
-├── output/                            # figures and animation outputs (not tracked)
+│   ├── params/                        # parameter sweep RDS files built by make_params.R,
+│   │                                  #   incl. best_case.rds (persistence validation)
+│   └── processed/                     # microenv_<site>[_h<step>].rds (manifests, ~1.4 MB each),
+│                                      #   species_niches.rds, pointmodel_*.rds, colonization
+│                                      #   outputs (not tracked)
+│                                      #   NB: full per-height arrays live in Lustre scratch
+├── output/                            # figures, animations, resolution-diagnostic CSVs (not tracked)
 └── logs/                              # timestamped run logs (not tracked)
 ```
 
@@ -182,7 +214,9 @@ canopymicroenv/
 | ERA5 climate data download | ✅ Complete |
 | DTM, landcover, vegetation, soil parameters | ✅ Complete |
 | Point model height loop (`runpointmodela`, all 5 sites) | ✅ Complete |
-| Grid microclimate model (`runmicro`, all 5 sites) | ✅ Complete (height files in Lustre scratch) |
+| Grid microclimate model (`runmicro`, all 5 sites, production 0.25 m) | ✅ Complete (height files in Lustre scratch) |
+| Resolution justification (timing + outcome comparison) | 🔄 In progress |
+| Cross-site species niche characterization | ✅ Complete |
 | Colonization model — single site | 🔄 In progress |
 | Colonization model — all sites | 🔄 In progress |
 | Forest structure (`build_forest`, Myster 2017 params) | ✅ Implemented |
@@ -212,7 +246,11 @@ canopymicroenv/
 - **Johansson (1974) zones** (JZ1–JZ5) are used to assign habitat suitability and bark surface area within `build_forest()`. Zone boundaries are proportional canopy height: JZ1 < 10 %, JZ2 < 30 %, JZ3 < 50 %, JZ4 < 80 %, JZ5 = emergent crown. Carrying capacity per voxel is derived from trunk or effective crown surface area divided by mean epiphyte footprint.
 - **Forest inventory baseline:** Myster (2017), Maquipucuna primary cloud forest, 1400 m: mean dsh 22.7 cm (trunk radius 0.114 m), 272–324 stems/ha (≥10 cm dsh). Used as default `forestparams` in one-site and all-sites runs.
 - **Incremental microclimate saves:** `run_microclimate_site.R` saves each height to its own `.rds` in Lustre scratch before proceeding. If the job is killed (e.g. SLURM timeout or OOM), resubmitting resumes from the last completed height automatically.
-- **microenv manifest format:** `microenv_<site>.rds` is a small list with `.heights` (numeric vector), `.height_dir` (path to scratch), and `.weather` (ERA5-cell baseline). The full 6 GB per-height spatial arrays stay in scratch. Load a specific height with `readRDS(file.path(microenv$.height_dir, sprintf("h%.2f.rds", h)))`.
+- **microenv manifest format:** `microenv_<site>[_h<step>].rds` is a small list with `.heights` (numeric vector), `.height_dir` (path to scratch), and `.weather` (ERA5-cell baseline). The full per-height spatial arrays stay in scratch. Load a specific height with `readRDS(file.path(microenv$.height_dir, sprintf("h%.2f.rds", h)))`.
+- **Canopy height ceiling:** the top of the modelled canopy at each site prefers the field-measured `CanopyHeight_m` column in `combinedv3.csv`; where that's missing, falls back to the 99th percentile of a GEE canopy-height raster (`vhgt.tif`); and only as a last resort falls back to the tallest recorded epiphyte observation. Using the tallest *observed individual* alone would truncate the canopy below its true height at any site where the tallest recorded epiphyte happened to grow lower than the surrounding forest.
+- **Species niche characterization:** `characterize_niches.R` pools each species' climate-niche observations across *every* site it was recorded at (not just the site being simulated), saving `data/processed/species_niches.rds`. Rerun it whenever `combinedv3.csv` gets new observations — every colonization run downstream picks up the refined niches automatically.
+- **Persistence validation (`best_case.rds`):** a deliberately generous parameter set (every vital rate pushed to its most favourable tested value) run for several replicates, used to confirm the model can sustain a population at all before interpreting non-persistence elsewhere as a genuine parameter effect rather than stochastic bad luck. Reused as the fixed parameter set for the height-resolution outcome comparison (`height_resolution_experiment.R`).
+- **Production resolution:** 10 m horizontal / 0.25 m vertical height-tier spacing. Chosen via `resolution_diagnostics.R` (timing: climate-cache build time scales linearly with height-tier count and dominates total cost, so height resolution — not horizontal resolution — governs compute budget at scale) and `height_resolution_experiment.R` (outcomes: full best-case runs at each candidate height step, to confirm the coarser spacing doesn't change results).
 - **HPC path:** `paths.R` sets `BASE_DIR` to the HPC home directory. The `CANOPY_PYTHON` environment variable controls which Python interpreter is used for Earth Engine; it defaults to the `canopy_rgee` conda environment.
 - **Runtime patches:** two monkey-patches are applied in `patches.R` to fix known bugs in `ecmwfr` and `microclimdata` without modifying package source.
 - **Credentials:** `credentials.rds` (CDS API, NASA Earthdata, Google credentials) is excluded from version control. You will need your own.

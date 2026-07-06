@@ -406,34 +406,68 @@ build_clim_cache <- function(microenv) {
 
 # ── Species climate niche ──────────────────────────────────────────────────────
 # Realized niche per species: the range of each climate variable at the
-# heights where that species was actually observed, expanded by a symmetric
-# tolerance pad — a fraction of the observed range added to each side. E.g.
-# an observed temp range of 23.4-23.6 C (0.2 C wide) with pad=0.5 becomes
-# 23.3-23.7 C (0.5 x 0.2 C added on each end). pad=0 keeps the raw observed
-# range, which is often a single point (zero width) given how few
-# observations most species have. Padding is proportional to that width, so
-# a zero-width range would get *zero* padding at any pad level — min_width
-# is an absolute floor per variable so pad still has an effect for
-# single-observation species (the common case here). Only vars that actually
-# vary by height belong here: precip/winddir come from microenv$.weather
-# (site-wide, not height-resolved) and would always be zero-width regardless
-# of observation count, so they're excluded by default.
-get_niche <- function(site_obs, microenv, vars = c("temp", "relhum"), pad = 0,
-                      min_width = c(temp = 0.5, relhum = 5)) {
+# heights where that species was actually observed, centred on the observed
+# midpoint and guaranteed at least `min_width_frac` of the SITE's full
+# vertical climate range wide — even at pad = 0. Earlier version padded
+# proportionally to the raw observed width with a small absolute floor
+# (0.5 C / 5% RH); that failed silently because pad=0 means 0 x anything = 0
+# regardless of the floor, and observed ranges here are ~0.1 C wide (2-3
+# observations per species, often at similar heights) — so *no* pad level
+# ever produced a niche wider than the observed range, gating establishment
+# to a handful of height tiers out of 55 regardless of every other
+# parameter. A floor expressed as a fraction of the site's own vertical
+# climate range is a physically meaningful minimum tolerance instead of an
+# arbitrary constant, and applies unconditionally so pad=0 still yields a
+# usable niche. pad > 0 widens further beyond that floor.
+#
+# Takes the already-computed heights/clim_by_height (from init_colonization,
+# via build_clim_cache) rather than re-deriving climate from microenv, since
+# re-reading every height tier's raster from disk here would otherwise
+# duplicate the same expensive I/O.
+#
+# The pad-independent geometry (mid, base_half_width) and the pad-application
+# step are factored out into niche_geometry()/apply_niche_pad() below so the
+# same math can be reused by characterize_niches.R, which pools observations
+# across *all* sites for a species instead of just the one being modeled —
+# see scripts/characterize_niches.R and init_colonization()'s cache lookup.
+
+# Pad-independent niche geometry from a matrix of observed climate values
+# (rows = observations, cols = variables) and a per-variable minimum width.
+# Centred on the observed midpoint; base_half_width is guaranteed at least
+# min_width/2 regardless of how narrow the raw observed range is.
+niche_geometry <- function(clim_vals, min_width) {
+  lo  <- apply(clim_vals, 2, min, na.rm = TRUE)
+  hi  <- apply(clim_vals, 2, max, na.rm = TRUE)
+  mid <- (lo + hi) / 2
+  base_half_width <- pmax((hi - lo) / 2, min_width / 2)
+  list(mid = mid, base_half_width = base_half_width)
+}
+
+# Apply a tolerance pad to a niche_geometry() result, producing the final
+# lo/hi box used by niche_match(). pad=0 keeps the geometry's guaranteed
+# minimum width; pad>0 widens further beyond it.
+apply_niche_pad <- function(geom, pad) {
+  half_width <- geom$base_half_width * (1 + pad)
+  list(lo = geom$mid - half_width, hi = geom$mid + half_width)
+}
+
+get_niche <- function(site_obs, heights, clim_by_height, vars = c("temp", "relhum"),
+                      pad = 0, min_width_frac = 0.10) {
+  clim_scalars <- do.call(rbind, lapply(clim_by_height, function(cl) {
+    if (is.null(cl)) return(setNames(rep(NA_real_, length(vars)), vars))
+    vapply(vars, function(v) mean(cl[[v]], na.rm = TRUE), numeric(1))
+  }))
+  site_range <- apply(clim_scalars, 2, function(x) diff(range(x, na.rm = TRUE)))
+  min_width  <- min_width_frac * site_range
+
+  obs_clim <- function(h) clim_scalars[which.min(abs(heights - h)), , drop = TRUE]
+
   species_ids <- sort(unique(site_obs$FinalID))
   niches <- lapply(species_ids, function(sp) {
     obs_sp <- site_obs[site_obs$FinalID == sp & !is.na(site_obs$Height_m), ]
-    clim_vals <- lapply(seq_len(nrow(obs_sp)), function(i) {
-      cl <- get_clim(obs_sp$Height_m[i], microenv)
-      if (is.null(cl)) return(NULL)
-      vapply(vars, function(v) mean(cl[[v]], na.rm = TRUE), numeric(1))
-    })
-    clim_vals <- do.call(rbind, Filter(Negate(is.null), clim_vals))
-    if (is.null(clim_vals) || nrow(clim_vals) == 0) return(NULL)
-    lo    <- apply(clim_vals, 2, min, na.rm = TRUE)
-    hi    <- apply(clim_vals, 2, max, na.rm = TRUE)
-    width <- pmax(hi - lo, min_width[vars])
-    list(lo = lo - pad * width, hi = hi + pad * width)
+    if (nrow(obs_sp) == 0) return(NULL)
+    clim_vals <- do.call(rbind, lapply(obs_sp$Height_m, obs_clim))
+    apply_niche_pad(niche_geometry(clim_vals, min_width), pad)
   })
   names(niches) <- species_ids
   niches
@@ -636,13 +670,42 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
 
   # Per-species realized climate niche, gating establishment in
   # run_pass2_establish() — see get_niche()/niche_match(). niche_pad = 0
-  # (default) keeps the raw observed range; make_params.R's niche_pad
-  # experiment sweeps this to test whether padding sparse per-species
-  # observations changes persistence.
-  niche_pad         <- if (!is.null(params$niche_pad)) params$niche_pad else 0
-  niches_by_species <- get_niche(site_obs, microenv, pad = niche_pad)
-  log_msg(sprintf("Niche pad %.3f: %d/%d species have a usable observed niche",
-                  niche_pad, sum(!sapply(niches_by_species, is.null)), n_species))
+  # still yields a usable (site-relative minimum-width) niche, not a
+  # zero-width point; make_params.R's niche_pad experiment sweeps pad to
+  # widen further beyond that floor.
+  #
+  # Prefer the pooled cross-site cache from characterize_niches.R (every
+  # observation of a species across all 5 sites, not just this one) if it
+  # exists and covers every species observed at this site — a species with
+  # only 2-3 records at one site may have several more elsewhere. Falls back
+  # to this-site-only get_niche() for any species the cache doesn't cover
+  # (e.g. added to the field data since the cache was last regenerated), or
+  # entirely if the cache doesn't exist at all.
+  niche_pad     <- if (!is.null(params$niche_pad)) params$niche_pad else 0
+  niche_cache_path <- file.path(PROCESSED_DIR, "species_niches.rds")
+  species_ids   <- sort(unique(site_obs$FinalID))
+  niches_by_species <- setNames(vector("list", length(species_ids)), species_ids)
+
+  cached_geom <- if (file.exists(niche_cache_path)) readRDS(niche_cache_path) else NULL
+  missing_from_cache <- character(0)
+  for (sp in species_ids) {
+    if (!is.null(cached_geom) && !is.null(cached_geom[[sp]])) {
+      niches_by_species[[sp]] <- apply_niche_pad(cached_geom[[sp]], niche_pad)
+    } else {
+      missing_from_cache <- c(missing_from_cache, sp)
+    }
+  }
+  if (length(missing_from_cache) > 0) {
+    fallback <- get_niche(site_obs[site_obs$FinalID %in% missing_from_cache, ],
+                          heights, clim_by_height, pad = niche_pad)
+    niches_by_species[missing_from_cache] <- fallback[missing_from_cache]
+  }
+
+  n_cached <- length(species_ids) - length(missing_from_cache)
+  log_msg(sprintf(
+    "Niche pad %.3f: %d/%d species have a usable observed niche (%d from cross-site cache, %d this-site-only)",
+    niche_pad, sum(!sapply(niches_by_species, is.null)), n_species,
+    n_cached, length(missing_from_cache)))
 
   params$a                <- a
   params$mean_swdown_site <- mean_swdown_site
@@ -1014,6 +1077,69 @@ plot_3d_abundance <- function(result, t = NULL) {
   print(fig); invisible(fig)
 }
 
+# Same idea as plot_3d_abundance() but across every timestep, using plotly's
+# built-in frame/animation support (play button + slider) instead of a
+# single static scatter. Saved as a self-contained HTML if out_path is
+# given. Not yet run against real output — verify once you have a result
+# worth animating (e.g. from a best_case replicate that actually persists).
+plot_3d_abundance_animated <- function(result, out_path = NULL) {
+  state <- result$state
+  n_t <- dim(result$abundanceA)[4]
+  sp_cols <- if (state$n_species == 1)
+    scico::scico(3, palette = "lipari", begin = 0.3, end = 0.7)[2]
+  else
+    scico::scico(state$n_species, palette = "lipari", begin = 0.2, end = 0.8)
+
+  rows <- list()
+  for (t in seq_len(n_t)) {
+    for (sp in seq_len(state$n_species)) {
+      sp_name <- state$species_ids[sp]; col <- sp_cols[sp]
+      for (stg in list(list(arr = result$abundanceS, nm = "S", sym = "circle"),
+                       list(arr = result$abundanceJ, nm = "J", sym = "diamond"),
+                       list(arr = result$abundanceA, nm = "A", sym = "square"))) {
+        idx <- which(stg$arr[, , , t, sp] > 0, arr.ind = TRUE)
+        if (nrow(idx) > 0)
+          rows[[length(rows) + 1]] <- data.frame(
+            x = idx[, 1], y = idx[, 2], z = idx[, 3], t = t,
+            species = sp_name, stage = stg$nm, color = col,
+            symbol = stg$sym, trace = paste0(sp_name, " ", stg$nm),
+            stringsAsFactors = FALSE)
+      }
+    }
+  }
+  if (length(rows) == 0) {
+    message("No individuals to plot across any timestep")
+    return(invisible(NULL))
+  }
+  df <- do.call(rbind, rows)
+
+  # trace -> color lookup (one row per unique trace, in matching order —
+  # safer than pairing two independently-deduplicated vectors)
+  trace_lu     <- df[!duplicated(df$trace), c("trace", "color")]
+  colors_named <- setNames(trace_lu$color, trace_lu$trace)
+
+  fig <- plotly::plot_ly(
+    df, x = ~x, y = ~y, z = ~z, frame = ~t, color = ~trace,
+    colors = colors_named,
+    symbol = ~symbol, symbols = c(circle = "circle", diamond = "diamond", square = "square"),
+    type = "scatter3d", mode = "markers",
+    marker = list(size = 6, opacity = 0.85)
+  ) |>
+    plotly::layout(
+      title = "Abundance over time",
+      scene = list(xaxis = list(title = "x"), yaxis = list(title = "y"),
+                   zaxis = list(title = "height tier"))
+    ) |>
+    plotly::animation_opts(frame = 400, transition = 200, redraw = TRUE) |>
+    plotly::animation_slider(currentvalue = list(prefix = "Year: "))
+
+  if (!is.null(out_path)) {
+    htmlwidgets::saveWidget(fig, out_path, selfcontained = TRUE)
+    message("Saved: ", out_path)
+  }
+  invisible(fig)
+}
+
 # ── Spin-up ───────────────────────────────────────────────────────────────────
 
 # Founders: n_founders individuals per species (a fixed, decoupled count —
@@ -1295,8 +1421,19 @@ run_experiment <- function(param_name, values, base = base_params,
 # giving length(p_poll) x length(p_germ) x length(p_s1) x n_reps jobs.
 # Returns a tidy data frame of S/J/A totals over time, with one column per
 # swept parameter recording the value used in that run.
+#
+# If checkpoint_var/checkpoint_path are given, jobs are processed in blocks
+# — one block per unique value of checkpoint_var — and the accumulated
+# results so far are saveRDS()'d to checkpoint_path after every block. This
+# bounds how much work is lost if the process is killed partway through a
+# long factorial (e.g. a SLURM walltime limit): at most one block's worth,
+# instead of the entire sweep, since without this the only saveRDS() call
+# happens after ALL jobs finish. mclapply's built-in mc.cores parallelism is
+# unaffected within each block; blocks just run sequentially relative to
+# each other, so total wall-clock time is essentially unchanged.
 run_factorial_experiment <- function(param_values, base = base_params,
-                                     n_reps = 1, timesteps = 20, spinup = 3) {
+                                     n_reps = 1, timesteps = 20, spinup = 3,
+                                     checkpoint_var = NULL, checkpoint_path = NULL) {
   param_names <- names(param_values)
   jobs <- do.call(expand.grid,
                   c(param_values, list(rep = seq_len(n_reps)), stringsAsFactors = FALSE))
@@ -1309,7 +1446,7 @@ run_factorial_experiment <- function(param_values, base = base_params,
   cat("Pre-computing shared climate lookup table for the factorial...\n")
   clim_cache <- build_clim_cache(microenv)
 
-  rows <- mclapply(seq_len(nrow(jobs)), function(i) {
+  run_job <- function(i) {
     p <- base
     for (nm in param_names) p[[nm]] <- jobs[[nm]][i]
     tag <- paste(sprintf("%s=%s", param_names,
@@ -1331,12 +1468,79 @@ run_factorial_experiment <- function(param_values, base = base_params,
     )
     for (nm in param_names) df[[nm]] <- jobs[[nm]][i]
     df
-  }, mc.cores = N_CORES)
+  }
 
-  df <- do.call(rbind, Filter(Negate(is.null), rows))
-  cat(sprintf("  Done: %d/%d runs succeeded\n",
-              length(Filter(Negate(is.null), rows)), nrow(jobs)))
-  df
+  use_checkpoints <- !is.null(checkpoint_var) && !is.null(checkpoint_path) &&
+    checkpoint_var %in% param_names
+
+  if (!use_checkpoints) {
+    rows <- mclapply(seq_len(nrow(jobs)), run_job, mc.cores = N_CORES)
+    df <- do.call(rbind, Filter(Negate(is.null), rows))
+    cat(sprintf("  Done: %d/%d runs succeeded\n",
+                length(Filter(Negate(is.null), rows)), nrow(jobs)))
+    return(df)
+  }
+
+  blocks    <- split(seq_len(nrow(jobs)), jobs[[checkpoint_var]])
+  all_rows  <- list()
+  n_done    <- 0L
+  for (block_val in names(blocks)) {
+    idx  <- blocks[[block_val]]
+    cat(sprintf("  -- block %s=%s: %d jobs --\n", checkpoint_var, block_val, length(idx)))
+    rows <- Filter(Negate(is.null), mclapply(idx, run_job, mc.cores = N_CORES))
+    n_done   <- n_done + length(rows)
+    all_rows <- c(all_rows, rows)
+    df_so_far <- do.call(rbind, all_rows)
+    saveRDS(df_so_far, checkpoint_path)
+    cat(sprintf("  Checkpoint saved (%d/%d jobs done so far): %s\n",
+                n_done, nrow(jobs), checkpoint_path))
+  }
+  cat(sprintf("  Done: %d/%d runs succeeded\n", n_done, nrow(jobs)))
+  do.call(rbind, all_rows)
+}
+
+# ── Replicated runner for a single (non-swept) parameter set ───────────────────
+# Runs n_reps independent replicates of one fixed params set in parallel —
+# e.g. to check whether an outcome (like establishment never succeeding) is
+# genuinely blocked or just one unlucky stochastic draw. Unlike
+# run_experiment()/run_factorial_experiment() (which discard each run's full
+# spatial arrays down to S/J/A totals, since they cover hundreds of combos),
+# this keeps every replicate's complete runcolonization() output — reasonable
+# since n_reps is typically a handful, not hundreds — so results stay usable
+# for spatial/animation plotting (see plot_3d_abundance_animated()), not just
+# aggregate totals. Returns list(runs = <one runcolonization() output per
+# replicate>, summary = <tidy S/J/A-over-time data frame, like
+# run_experiment()'s output but without a param_value column>).
+run_replicated <- function(params, n_reps = 1, timesteps = 20, spinup = 3,
+                           clim_cache = NULL) {
+  cat(sprintf("\n====== %d replicate(s) on %d cores ======\n", n_reps, N_CORES))
+  if (is.null(clim_cache)) clim_cache <- build_clim_cache(microenv)
+
+  runs <- mclapply(seq_len(n_reps), function(rep) {
+    suppressMessages(
+      r <- run_one(params, tag = sprintf("rep%d", rep), timesteps = timesteps,
+                  spinup = spinup, clim_cache = clim_cache)
+    )
+    r
+  }, mc.cores = min(N_CORES, n_reps))
+
+  ok <- !vapply(runs, is.null, logical(1))
+  cat(sprintf("  Done: %d/%d replicates succeeded\n", sum(ok), n_reps))
+
+  summary_df <- do.call(rbind, lapply(seq_along(runs), function(i) {
+    r <- runs[[i]]
+    if (is.null(r)) return(NULL)
+    T <- timesteps
+    data.frame(
+      rep = i, t = 1:T,
+      totalS = r$totalabundanceS, totalJ = r$totalabundanceJ,
+      totalA = r$totalabundanceA,
+      total  = r$totalabundanceS + r$totalabundanceJ + r$totalabundanceA,
+      extinct = all(r$totalabundanceA[(T %/% 2):T] == 0)
+    )
+  }))
+
+  list(runs = runs, summary = summary_df)
 }
 
 # ── Plot: S, J, A panels ──────────────────────────────────────────────────────

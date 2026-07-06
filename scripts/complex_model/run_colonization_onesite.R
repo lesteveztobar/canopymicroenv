@@ -19,8 +19,8 @@ library(plotly)
 library(ggplot2)
 library(patchwork)
 library(parallel)
-source("scripts/paths.R")
-source("scripts/get_colonization.R")
+source("scripts/complex_model/paths.R")
+source("scripts/complex_model/get_colonization.R")
 
 # ── Command-line arguments (for cluster / batch runs) ────────────────────────
 args         <- commandArgs(trailingOnly = TRUE)
@@ -166,10 +166,19 @@ if (length(swept_params) > 1) {
   N_REPS <- 1  # replicates per combo — factorials get large fast (see paper's 729-combo x1 design)
   param_values <- setNames(lapply(swept_params, function(nm) params[[nm]]), swept_params)
   n_combos <- prod(vapply(param_values, length, integer(1)))
-  log_msg(sprintf("Factorial sweep %s: %d combos x %d reps on %d cores...",
-                  paste(swept_params, collapse = " x "), n_combos, N_REPS, N_CORES))
+  # Checkpoint by the last-listed swept parameter (expand.grid's slowest-
+  # varying dimension, so the natural "outer loop" grouping) so a walltime
+  # kill loses at most one block's worth of jobs instead of the whole sweep.
+  checkpoint_var  <- swept_params[length(swept_params)]
+  checkpoint_path <- file.path(PROCESSED_DIR,
+    sprintf("colonization_%s_%s_checkpoint.rds", site_name, exp_tag))
+  log_msg(sprintf("Factorial sweep %s: %d combos x %d reps on %d cores (checkpointing by %s to %s)...",
+                  paste(swept_params, collapse = " x "), n_combos, N_REPS, N_CORES,
+                  checkpoint_var, checkpoint_path))
   result <- run_factorial_experiment(param_values, base = params,
-                                     n_reps = N_REPS, timesteps = 30, spinup = 5)
+                                     n_reps = N_REPS, timesteps = 30, spinup = 5,
+                                     checkpoint_var = checkpoint_var,
+                                     checkpoint_path = checkpoint_path)
 } else if (length(swept_params) == 1) {
   swept_param <- swept_params
   N_CORES <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", NA)))
@@ -181,22 +190,17 @@ if (length(swept_params) > 1) {
   result <- run_experiment(swept_param, params[[swept_param]], base = params,
                             n_reps = N_REPS, timesteps = 30, spinup = 5)
 } else {
-  log_msg(sprintf("Starting colonization run [%s | %s]...", site_name, exp_tag))
-  result <- runcolonization(
-    site         = site,
-    niches       = niches,
-    canopy_grid  = canopy_grid,
-    microenv     = microenv,
-    timesteps    = 30,
-    resolution   = 10,
-    carCap       = 5,           # fallback scalar (used only if forestparams = NULL)
-    maxDisp      = 10,
-    spinup       = 5,
-    Visualize    = !interactive(),
-    sleeptime    = 0.2,
-    parameters   = params,
-    forestparams = forestparams
-  )
+  # No swept parameter. params$n_reps (default 1) controls how many
+  # independent replicates to run — more than 1 is useful to tell "genuinely
+  # blocked" apart from "one unlucky stochastic draw" (see
+  # run_replicated()). n_reps=1 behaves like a single runcolonization() call,
+  # just wrapped in the same list(runs=, summary=) structure for consistency.
+  N_CORES <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", NA)))
+  if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
+  N_REPS <- if (!is.null(params$n_reps)) params$n_reps else 1
+  log_msg(sprintf("Starting colonization run [%s | %s]: %d replicate(s) on %d cores...",
+                  site_name, exp_tag, N_REPS, N_CORES))
+  result <- run_replicated(params, n_reps = N_REPS, timesteps = 30, spinup = 5)
 }
 
 out_path <- file.path(PROCESSED_DIR,
@@ -211,8 +215,15 @@ if (interactive()) {
   } else if (is.data.frame(result)) {
     message("Factorial result — no dedicated plot yet; inspect the data frame directly ",
             "(columns: ", paste(swept_params, collapse = ", "), ", t, totalS/J/A, extinct).")
-  } else {
-    plot_abundance(result)
-    plot_3d_abundance(result)
+  } else if (is.list(result) && !is.null(result$runs)) {
+    # No swept parameter: result$runs is one runcolonization() output per
+    # replicate. Plot the first successful one.
+    first_ok <- Filter(Negate(is.null), result$runs)
+    if (length(first_ok) > 0) {
+      plot_abundance(first_ok[[1]])
+      plot_3d_abundance(first_ok[[1]])
+    } else {
+      message("No replicate succeeded — nothing to plot.")
+    }
   }
 }

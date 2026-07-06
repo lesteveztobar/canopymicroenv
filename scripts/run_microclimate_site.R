@@ -14,7 +14,7 @@ N_MONTHS    <- if (length(args) >= 2) as.integer(args[2]) else 12L
 # testing a coarser resolution is proportionally cheaper, not free.
 HEIGHT_STEP <- if (length(args) >= 3) as.numeric(args[3]) else 0.1
 
-source("scripts/patches.R")
+source("scripts/complex_model/patches.R")
 library(rgee)
 library(readr)
 library(mcera5)
@@ -24,13 +24,13 @@ library(terra)
 library(luna)
 
 PYTHON_PATH <- Sys.getenv("CANOPY_PYTHON",
-  unset = "/home/lestevez/miniforge3/bin/python")
+  unset = "/home/s38leste_hpc/.conda/envs/canopy_rgee/bin/python")
 reticulate::use_python(PYTHON_PATH, required = TRUE)
 
 source("scripts/get_microenv.R")
 source("scripts/get_climateinputs.R")
-source("scripts/paths.R")
-source("scripts/helper_functions.R")
+source("scripts/complex_model/paths.R")
+source("scripts/complex_model/helper_functions.R")
 
 mycredentials <- readRDS(file.path(BASE_DIR, "credentials.rds"))
 cds_row <- mycredentials[mycredentials$Site == "CDS", ]
@@ -164,7 +164,47 @@ log_msg("Subsetting point model to monthly max/min days...")
 micropoint_mx <- microclimf::subsetpointmodela(model, tstep = "month", what = "tmax")
 micropoint_mn <- microclimf::subsetpointmodela(model, tstep = "month", what = "tmin")
 
-heights    <- seq(0.1, site$hObs_max, by = HEIGHT_STEP)
+
+# The model's height ceiling must be the canopy top, not the tallest
+# recorded epiphyte observation (site$hObs_max) — the latter only reflects
+# where individuals happened to be found by observers, not how tall the
+# forest actually is, and silently truncates the microclimate/landscape
+# grid below the real canopy (e.g. Maquipucuna's forest is ~14.7 m tall on
+# average, but hObs_max there is only 5.5 m). Preference order:
+#   1. site$hCanopy_max — measured CanopyHeight_m from combinedv3.csv
+#      (make_sites(), get_climateinputs.R), when available: real field
+#      measurements at the observation points, more trustworthy than a
+#      remote-sensing product for this specific forest.
+#   2. 99th percentile of the GEE canopy-height raster already downloaded
+#      for microclimf's vegetation parameters (vhgt.tif) — robust to
+#      single-pixel outliers, unlike a bare max().
+#   3. hObs_max, if neither of the above is available.
+# Never goes below hObs_max regardless of source (every observed individual
+# must remain inside the modelled height range).
+if (!is.null(site$hCanopy_max) && is.finite(site$hCanopy_max)) {
+  height_ceiling <- max(site$hCanopy_max, site$hObs_max)
+  log_msg(sprintf("Canopy height (measured, CanopyHeight_m): %.1f m (hObs_max was %.1f m)",
+                  site$hCanopy_max, site$hObs_max))
+} else {
+  vhgt_path <- file.path(site_dir, "vhgt.tif")
+  height_ceiling <- if (file.exists(vhgt_path)) {
+    vhgt_vals <- terra::values(terra::rast(vhgt_path), na.rm = TRUE)
+    if (length(vhgt_vals) > 0) {
+      ceiling_from_canopy <- as.numeric(quantile(vhgt_vals, 0.99, na.rm = TRUE))
+      log_msg(sprintf("No measured CanopyHeight_m — using p99 of vhgt.tif: %.1f m (hObs_max was %.1f m)",
+                      ceiling_from_canopy, site$hObs_max))
+      max(ceiling_from_canopy, site$hObs_max)
+    } else {
+      log_msg("No measured CanopyHeight_m and vhgt.tif has no valid values — falling back to hObs_max.")
+      site$hObs_max
+    }
+  } else {
+    log_msg("No measured CanopyHeight_m and no vhgt.tif — falling back to hObs_max.")
+    site$hObs_max
+  }
+}
+
+heights    <- seq(0.1, height_ceiling, by = HEIGHT_STEP)
 height_dir <- file.path(scratch_base, sprintf("microenv_%s%s_heights", site$Site, res_suffix))
 dir.create(height_dir, recursive = TRUE, showWarnings = FALSE)
 

@@ -6,7 +6,7 @@
 # Output: per-site microenvironment lists saved to data/processed/
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
-source("scripts/patches.R")
+source("scripts/complex_model/patches.R")
 # ── Libraries ─────────────────────────────────────────────────────────────────
 library(rgee)
 library(readr)
@@ -21,14 +21,14 @@ library(luna)
 
 # Python environment for rgee / Earth Engine
 PYTHON_PATH <- Sys.getenv("CANOPY_PYTHON",
-  unset = "/home/s38leste_hpc/.conda/envs/canopy_rgee/lib/python3.12")
+  unset = "/home/s38leste_hpc/.conda/envs/canopy_rgee/bin/python")
 reticulate::use_python(PYTHON_PATH, required = TRUE)
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 source("scripts/get_microenv.R")
 source("scripts/get_climateinputs.R")
-source("scripts/paths.R")
-source("scripts/helper_functions.R")
+source("scripts/complex_model/paths.R")
+source("scripts/complex_model/helper_functions.R")
 
 mycredentials <- readRDS(file.path("/home/s38leste_hpc/canopymicroenv/credentials.rds"))
 

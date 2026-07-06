@@ -48,3 +48,9 @@ scripts/simple_colonization.R
 
 # --- Params files ---
 data/params/*
+
+# --- Report ---
+report
+
+# --- Literature ---
+data/literature

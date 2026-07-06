@@ -18,8 +18,8 @@
 # Output: data/processed/colonization_<site>_<tag>.rds for each site
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
-source("scripts/paths.R")
-source("scripts/get_colonization.R")
+source("scripts/complex_model/paths.R")
+source("scripts/complex_model/get_colonization.R")
 
 # ── Arguments ─────────────────────────────────────────────────────────────────
 args        <- commandArgs(trailingOnly = TRUE)

@@ -28,6 +28,6 @@ PARAMS=$2    # path to params RDS (e.g. data/params/p_poll.rds), or omit for lit
 
 EXPTAG=$3
 
-Rscript scripts/run_colonization_onesite.R "$SITE" "$PARAMS" "$EXPTAG"
+Rscript scripts/complex_model/run_colonization_onesite.R "$SITE" "$PARAMS" "$EXPTAG"
 
 

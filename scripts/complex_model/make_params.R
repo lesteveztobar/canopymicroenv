@@ -1,4 +1,4 @@
-source("scripts/paths.R")
+source("scripts/complex_model/paths.R")
 
 # Founders per species (see get_colonization.R::run_spinup()), used as a
 # fixed baseline across every experiment below except the n_founders sweep
@@ -203,16 +203,22 @@ n_founders = seq(5, 100, by = 5)
 out_path <- file.path(PARAMS_DIR, "n_founders.rds")
 saveRDS(params_nfounders, out_path)
 
-# ── Reproduction factorial: p_poll x p_germ x p_s1 ──────────────────────────────
-# Full factorial across the three components of fecundity (pollination
-# success, mycorrhizal germination, first-year seed-to-seedling survival) —
-# 5^3 = 125 combinations, run via run_factorial_experiment() (dispatched from
-# run_colonization_onesite.R when more than one field is a vector). Mirrors
-# the simple model's full-factorial design (see report.pdf sec. 2.4.2), but
-# targeted at the two bottlenecks the simple model identified as dominant:
-# establishment (mycorrhizal gate, p_germ) and reproduction (pollination
-# success x seed survival, p_poll x p_s1). Uses N_FOUNDERS_DEFAULT — re-run
-# make_params.R and resubmit after the n_founders sweep updates that value.
+# ── Reproduction factorial: n_founders x p_poll x p_germ x p_s1 ────────────────
+# Full factorial across founder count and the three components of fecundity
+# (pollination success, mycorrhizal germination, first-year seed-to-seedling
+# survival) — 5^4 = 625 combinations, run via run_factorial_experiment().
+# n_founders alone (5-100, at literature-default reproduction) came back
+# 100% extinct at every level tested — the fecundity formula makes expected
+# seed output per adult per year ~0.00006 at baseline, so no realistic
+# founder count rescues it there. Crossing n_founders into the factorial
+# instead of testing it in isolation finds the actual joint threshold
+# directly, mirroring how the simple model's Fig. 5 (report.pdf sec. 3.3)
+# found the p_est x lambda threshold in one factorial rather than
+# sequentially. n_founders levels span from what we already know fails
+# (50, 100) up to what the math says should be comfortably enough at the
+# most generous reproduction corner tested (400, 800): at
+# p_poll=0.7/p_germ=0.005/p_s1=0.75, expected seeds/adult/yr ~0.0011, so
+# n_founders=200 gives ~5 expected seeds over 30 years, n_founders=800 ~30.
 params_reprofactorial <- list(
 beta0S  = -0.24,  beta0J  =  0.41,  beta0A  =  1.73,
 beta1   =  0.10,
@@ -228,8 +234,37 @@ p_germ  = c(0.0001, 0.0005, 0.001, 0.003, 0.005),
 p_s1    = c(0.15, 0.30, 0.45, 0.60, 0.75),
 # canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
 lambda = 1,  Ut = 1,
-n_founders = N_FOUNDERS_DEFAULT
+n_founders = c(50, 100, 200, 400, 800)
 )
 
 out_path <- file.path(PARAMS_DIR, "reproduction_factorial.rds")
 saveRDS(params_reprofactorial, out_path)
+
+# ── Best case: everything pushed as favourable as possible ─────────────────────
+# Every lever more generous than anything tested so far in the OAT sweeps or
+# the factorial — not meant to be realistic, just to answer "can the model
+# persist at all?" n_reps replicates (see run_replicated() in
+# get_colonization.R) rather than a single run, since a single zero-
+# establishment outcome can't distinguish "genuinely blocked" from "just an
+# unlucky stochastic draw" — see project memory on the niche/founder/
+# capacity-saturation investigation for why this matters here specifically.
+params_bestcase <- list(
+beta0S  = -0.24,  beta0J  =  0.41,  beta0A  =  3.50,   # max tested (best survival)
+beta1   =  0.10,
+z_S_min =  0.0,  z_S_max =  1.0,
+z_J_min =  1.0,  z_J_max =  7.0,
+z_A_min =  7.0,  z_A_max = 20.0,
+psi0S        = -3.30,  psi0J        = -2.70,
+beta_precip  =  1e-3,  beta_rh      =  0.040,          # max tested (best growth)
+sigma        =  0.10,  delta_z_base =  0.80,
+cost_repro   =  0.20,                                   # min tested (least reproduction cost)
+p_poll  = 0.90,  p_germ  = 0.01,  p_s1 = 0.90,           # beyond anything tested so far
+# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+lambda = 1,  Ut = 1,
+n_founders = 1000,                                       # beyond the 800 max tested
+niche_pad  = 0.5,                                         # far beyond the 0.05 max tested
+n_reps     = 5
+)
+
+out_path <- file.path(PARAMS_DIR, "best_case.rds")
+saveRDS(params_bestcase, out_path)

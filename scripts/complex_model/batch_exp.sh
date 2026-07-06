@@ -4,7 +4,7 @@
 # across all timesteps for one site. SITES x EXP = 5 x 9 = 45 jobs.
 #
 # RECOMMENDED ORDER: run founder_number for one site alone first (e.g.
-#   sbatch scripts/run_colonization.sh Maquipucuna "$(pwd)/data/params/n_founders.rds" founder_number
+#   sbatch scripts/complex_model/run_colonization.sh Maquipucuna "$(pwd)/data/params/n_founders.rds" founder_number
 # ) to find an n_founders value that actually persists — the fecundity math
 # means every other sweep is likely to come back extinct until that's
 # fixed. Once found, update N_FOUNDERS_DEFAULT in make_params.R, re-run it,
@@ -28,7 +28,7 @@ module purge
 module load GCCcore/13.3.0
 module load R/4.4.2-gfbf-2024a
 
-Rscript scripts/make_params.R
+Rscript scripts/complex_model/make_params.R
 
 SITES=("Maquipucuna" "Mashpi" "MindoTarabita" "MiradorMindo" "Yanayacu")
 
@@ -41,7 +41,7 @@ PARAMS_DIR="/home/$USER/canopymicroenv/data/params"
 
 for i in "${!SITES[@]}"; do
     for k in "${!EXP[@]}"; do
-        sbatch /home/$USER/canopymicroenv/scripts/run_colonization.sh \
+        sbatch /home/$USER/canopymicroenv/scripts/complex_model/run_colonization.sh \
             "${SITES[$i]}" \
             "$PARAMS_DIR/${PARAMS[$k]}" \
             "${EXP[$k]}"

@@ -9,8 +9,8 @@
 library(ggplot2)
 library(patchwork)
 library(parallel)
-source("scripts/paths.R")
-source("scripts/get_colonization.R")
+source("scripts/complex_model/paths.R")
+source("scripts/complex_model/get_colonization.R")
 
 N_CORES <- max(1L, detectCores() - 1L)
 cat(sprintf("Using %d parallel cores\n", N_CORES))

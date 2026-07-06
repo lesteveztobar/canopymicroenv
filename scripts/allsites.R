@@ -5,11 +5,11 @@
 library(dplyr)
 library(readr)
 library(rgee)
-source("scripts/helper_functions.R")
+source("scripts/complex_model/helper_functions.R")
 source("scripts/get_climateinputs.R")
 source("scripts/get_microenv.R")
-source("scripts/get_colonization.R")
-source("scripts/paths.R")
+source("scripts/complex_model/get_colonization.R")
+source("scripts/complex_model/paths.R")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 dir.create(LOGS_DIR, recursive = TRUE, showWarnings = FALSE)

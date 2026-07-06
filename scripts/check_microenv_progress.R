@@ -6,14 +6,23 @@
 #
 # Usage:
 #   export CANOPY_SCRATCH=$(ws_find canopymicroenv)
-#   Rscript scripts/check_microenv_progress.R                       # all sites, 0.1m
-#   Rscript scripts/check_microenv_progress.R Maquipucuna 0.1,0.25,0.5,1.0  # one site, several height steps
+#   module load GCCcore/13.3.0 R/4.4.2-gfbf-2024a
+#   # Needed so terra can actually load vhgt.tif for sites without measured
+#   # CanopyHeight_m — without this, height_ceiling_for() silently falls back
+#   # to hObs_max and under-reports the expected height count for those sites
+#   # specifically (the ones WITH measured CanopyHeight_m are unaffected,
+#   # since they never touch terra in this script at all).
+#   export LD_LIBRARY_PATH="/opt/software/easybuild-INTEL/software/PROJ/9.3.1-GCCcore-13.2.0/lib:/opt/software/easybuild-INTEL/software/GDAL/3.9.0-foss-2023b/lib:/opt/software/easybuild-INTEL/software/GEOS/3.12.1-GCC-13.2.0/lib:$LD_LIBRARY_PATH"
+#
+#   Rscript scripts/check_microenv_progress.R                                  # all sites, 0.1m
+#   Rscript scripts/check_microenv_progress.R Maquipucuna 0.1,0.25,0.5,1.0     # one site, several height steps
+#   Rscript scripts/check_microenv_progress.R Maquipucuna,Mashpi,Yanayacu 0.25 # several sites (comma-separated), one step
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
-source("scripts/paths.R")
+source("scripts/complex_model/paths.R")
 
 args <- commandArgs(trailingOnly = TRUE)
-SITES <- if (length(args) >= 1) args[1] else
+SITES <- if (length(args) >= 1) strsplit(args[1], ",")[[1]] else
   c("Maquipucuna", "Mashpi", "MindoTarabita", "MiradorMindo", "Yanayacu")
 HEIGHT_STEPS <- if (length(args) >= 2) as.numeric(strsplit(args[2], ",")[[1]]) else 0.1
 
@@ -26,11 +35,25 @@ if (nchar(scratch) == 0 || !dir.exists(scratch)) {
 niches <- read.csv("data/csv/combinedv3.csv")
 niches <- niches[!is.na(niches$Height_m), ]
 
+# Height ceiling now comes from measured CanopyHeight_m first, then the
+# canopy-height raster (vhgt.tif), then hObs_max — see
+# run_microclimate_site.R. Reuse the same preference order here so
+# "expected" counts match reality.
+height_ceiling_for <- function(s, hmax, canopy_max) {
+  if (is.finite(canopy_max)) return(max(canopy_max, hmax))
+  vhgt_path <- file.path(RAW_DIR, s, "vhgt.tif")
+  if (!requireNamespace("terra", quietly = TRUE) || !file.exists(vhgt_path)) return(hmax)
+  vals <- tryCatch(terra::values(terra::rast(vhgt_path), na.rm = TRUE), error = function(e) numeric(0))
+  if (length(vals) == 0) return(hmax)
+  max(as.numeric(quantile(vals, 0.99, na.rm = TRUE)), hmax)
+}
+
 cat(sprintf("%-15s %-6s %-14s %-10s %s\n", "Site", "Step", "Heights", "Manifest", "Height dir"))
 cat(strrep("-", 80), "\n")
 
 for (s in SITES) {
   hmax <- suppressWarnings(max(niches$Height_m[niches$Area_or_Site == s], na.rm = TRUE))
+  canopy_max <- suppressWarnings(max(niches$CanopyHeight_m[niches$Area_or_Site == s], na.rm = TRUE))
   for (step in HEIGHT_STEPS) {
     suffix <- if (step != 0.1) sprintf("_h%.2f", step) else ""
     height_dir <- file.path(scratch, sprintf("microenv_%s%s_heights", s, suffix))
@@ -41,7 +64,8 @@ for (s in SITES) {
       cat(sprintf("%-15s %-6.2f %-14s %-10s %s\n", s, step, "no obs in CSV", manifest_status, height_dir))
       next
     }
-    n_expected <- length(seq(0.1, hmax, by = step))
+    ceiling <- height_ceiling_for(s, hmax, canopy_max)
+    n_expected <- length(seq(0.1, ceiling, by = step))
 
     if (!dir.exists(height_dir)) {
       cat(sprintf("%-15s %-6.2f %-14s %-10s %s\n", s, step, sprintf("0/%d", n_expected), manifest_status,

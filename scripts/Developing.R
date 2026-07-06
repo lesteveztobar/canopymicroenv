@@ -11,8 +11,8 @@ library(microclimdata)
 library(microclimf)
 
 source("scripts/functions.R")
-source("scripts/helper_functions.R")
-source("scripts/paths.R")
+source("scripts/complex_model/helper_functions.R")
+source("scripts/complex_model/paths.R")
 
 # ── Load microclimate outputs ─────────────────────────────────────────────────
 models <- readRDS(file.path(BASE_DIR, "data/processed/pointmodelv1.rds"))

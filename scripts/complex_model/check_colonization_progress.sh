@@ -3,8 +3,8 @@
 # run_colonization_onesite.R job (single run or sweep) from its log file.
 # Read-only — safe to run any time, no module load needed.
 #
-# Usage: sh scripts/check_colonization_progress.sh <site> <exp_tag>
-#   e.g. sh scripts/check_colonization_progress.sh Maquipucuna pollination_success
+# Usage: sh scripts/complex_model/check_colonization_progress.sh <site> <exp_tag>
+#   e.g. sh scripts/complex_model/check_colonization_progress.sh Maquipucuna pollination_success
 # ─────────────────────────────────────────────────────────────────────────────
 SITE=$1
 TAG=$2
@@ -28,6 +28,8 @@ if [ -n "$SWEEP_LINE" ]; then
   N_VALUES=$(echo "$SWEEP_LINE" | grep -oE '[0-9]+ values' | grep -oE '^[0-9]+')
   N_COMBOS=$(echo "$SWEEP_LINE" | grep -oE '[0-9]+ combos' | grep -oE '^[0-9]+')
   N_REPS=$(echo "$SWEEP_LINE" | grep -oE '[0-9]+ reps' | grep -oE '^[0-9]+')
+  N_CORES=$(echo "$SWEEP_LINE" | grep -oE '[0-9]+ cores' | grep -oE '^[0-9]+')
+  N_CORES=${N_CORES:-"?"}
   if [ -n "$N_COMBOS" ] && [ -n "$N_REPS" ]; then
     N_JOBS=$((N_COMBOS * N_REPS))
   elif [ -n "$N_VALUES" ] && [ -n "$N_REPS" ]; then
@@ -36,7 +38,7 @@ if [ -n "$SWEEP_LINE" ]; then
     N_JOBS="?"
   fi
   DONE_STEPS=$(grep -c '\] t=' "$LOG")
-  echo "Timestep log lines so far: $DONE_STEPS  (all $N_JOBS jobs interleaved in this file — only 4 run concurrently)"
+  echo "Timestep log lines so far: $DONE_STEPS  (all $N_JOBS jobs interleaved in this file — only $N_CORES run concurrently)"
 else
   DONE_STEPS=$(grep -c '\] t=' "$LOG")
   echo "Single (non-swept) run — timestep log lines so far: $DONE_STEPS"

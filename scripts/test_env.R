@@ -2,7 +2,7 @@ PYTHON_PATH <- Sys.getenv("CANOPY_PYTHON",
   unset = "/home/s38leste_hpc/.conda/envs/canopy_rgee/bin/python3.12")
 reticulate::use_python(PYTHON_PATH, required = TRUE)
 
-source("scripts/patches.R")
+source("scripts/complex_model/patches.R")
 
 pkgs <- c("rgee", "readr", "mcera5", "microclimf", "microclimdata",
           "terra", "luna", "reticulate", "ecmwfr", "parallel")

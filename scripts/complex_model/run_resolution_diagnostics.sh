@@ -12,13 +12,13 @@
 #   e.g.: sbatch run_resolution_diagnostics.sh Maquipucuna "0.1,0.25,0.5,1.0" "5,10,20,40"
 # Run from: /home/s38leste_hpc/canopymicroenv/
 #
-#SBATCH --partition=lm_short
+#SBATCH --partition=lm_medium
 #SBATCH --account=ag_biob_scabral
-#SBATCH --time=02:00:00
+#SBATCH --time=08:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=200G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=300G
 #SBATCH --output=/home/s38leste_hpc/canopymicroenv/logs/log_%j.out
 
 module purge
@@ -31,4 +31,4 @@ SITE=${1:?"Usage: sbatch run_resolution_diagnostics.sh <site> [height_steps] [ho
 HEIGHT_STEPS=$2
 HORIZ_RES=$3
 
-Rscript scripts/resolution_diagnostics.R "$SITE" "$HEIGHT_STEPS" "$HORIZ_RES"
+Rscript scripts/complex_model/resolution_diagnostics.R "$SITE" "$HEIGHT_STEPS" "$HORIZ_RES"
