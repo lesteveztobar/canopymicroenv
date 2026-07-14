@@ -38,4 +38,10 @@ for (site in SITES) {
   plot_default_colonization_run(site)
 }
 
+cat("\n== Best-case (persistence validation) run ==\n")
+# Only Maquipucuna has a post-p_germ-fix best-case run so far (see
+# report/methods.tex, Persistence validation) -- add more sites here as
+# their own best_case_h0.25 results land in data/processed/.
+plot_default_colonization_run("Maquipucuna", exp_tag = "best_case_h0.25")
+
 cat("\nAll done. Plots (where inputs existed) are in", OUTPUT_DIR, "\n")

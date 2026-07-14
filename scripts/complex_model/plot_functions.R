@@ -16,12 +16,6 @@ library(ggplot2)
 library(patchwork)
 library(plotly)
 library(htmlwidgets)
-library(sf)
-library(dplyr)
-library(rnaturalearth)
-library(rnaturalearthdata)
-library(ggspatial)
-library(scico)
 library(abind)
 library(scatterplot3d)
 
@@ -30,8 +24,20 @@ source("scripts/complex_model/get_colonization.R")
 
 # ── Field site map ─────────────────────────────────────────────────────────────
 # NW Ecuador Maxillariinae field sites, from GeoJSON transects/points.
+# sf/dplyr/rnaturalearth(data)/ggspatial/scico are loaded here rather than at
+# file level: this is the only function in the file that needs them (all are
+# geospatial/mapping-specific, several with heavy system-library dependencies
+# -- GDAL/PROJ/GEOS/UDUNITS -- that every other function in this file has no
+# reason to require just to be sourced).
 plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "raw"),
                            out_dir = OUTPUT_DIR) {
+  library(sf)
+  library(dplyr)
+  library(rnaturalearth)
+  library(rnaturalearthdata)
+  library(ggspatial)
+  library(scico)
+
   geojson_files <- c(
     Maquipucuna   = "Maquipucuna.geojson",
     Mashpi        = "Mashpi.geojson",
@@ -192,7 +198,10 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
     )
 
   volume_path <- file.path(out_dir, sprintf("temp_volume_%s.html", site_name))
-  htmlwidgets::saveWidget(fig, volume_path, selfcontained = TRUE)
+  # selfcontained=TRUE needs pandoc (not installed on the cluster); FALSE
+  # writes a small "<name>_files/" dependency folder alongside the HTML
+  # instead -- keep the two together when copying/viewing elsewhere.
+  htmlwidgets::saveWidget(fig, volume_path, selfcontained = FALSE)
   message("Saved: ", volume_path)
 
   # ── Side-view heatmap + per-height boxplot ────────────────────────────────
@@ -349,7 +358,7 @@ plot_bestfit_3d_comparison <- function(out_dir = OUTPUT_DIR) {
   df_best_plot <- add_cols(df_best_plot)
 
   out_path <- file.path(out_dir, "bestfit_3d.png")
-  png(out_path, width = 3200, height = 1400, res = 180)
+  png(out_path, width = 3200, height = 1400, res = 180, type = "cairo")
   on.exit(dev.off(), add = TRUE)
 
   layout(matrix(c(1, 2, 3), nrow = 1), widths = c(10, 10, 3))
@@ -531,7 +540,7 @@ plot_default_colonization_run <- function(site_name, exp_tag = "default",
   saved <- lapply(seq_along(runs), function(i) {
     suffix <- if (length(runs) > 1) sprintf("_rep%d", i) else ""
     abundance_path <- file.path(out_dir, sprintf("abundance_%s_%s%s.png", site_name, exp_tag, suffix))
-    png(abundance_path, width = 1800, height = 900, res = 150)
+    png(abundance_path, width = 1800, height = 900, res = 150, type = "cairo")
     plot_abundance(runs[[i]])
     dev.off()
     message("Saved: ", abundance_path)
@@ -543,7 +552,10 @@ plot_default_colonization_run <- function(site_name, exp_tag = "default",
   fig_3d <- plot_3d_abundance(runs[[1]])
   volume_path <- file.path(out_dir, sprintf("abundance_3d_%s_%s.html", site_name, exp_tag))
   if (!is.null(fig_3d)) {
-    htmlwidgets::saveWidget(fig_3d, volume_path, selfcontained = TRUE)
+    # selfcontained=TRUE needs pandoc (not installed on the cluster); FALSE
+    # writes a small "<name>_files/" dependency folder alongside the HTML
+    # instead -- keep the two together when copying/viewing elsewhere.
+    htmlwidgets::saveWidget(fig_3d, volume_path, selfcontained = FALSE)
     message("Saved: ", volume_path)
   }
 

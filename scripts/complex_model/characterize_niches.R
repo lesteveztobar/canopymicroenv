@@ -6,6 +6,17 @@
 # init_colonization() (get_colonization.R) in preference to the this-site-
 # only get_niche() fallback.
 #
+# Each observed individual is augmented with the 12 within-year monthly
+# conditions at its recorded height, rather than collapsed to that height's
+# single annual mean — a species realistically tolerates whatever seasonal
+# range its occupied height experiences over a year, not just that height's
+# average, and pooling the full monthly record turns each raw observation
+# into 12 data points instead of 1, giving a far better-supported niche
+# estimate than the handful of field observations alone could. Each monthly
+# value already averages a representative warm day + cold day (48 hourly
+# values), so it reflects a month-scale typical condition rather than a
+# single transient hour.
+#
 # Rerun this whenever you add observations to data/csv/combinedv3.csv — it's
 # the only step that needs to change; every colonization run downstream picks
 # up the refined niches automatically without needing to recompute anything
@@ -50,18 +61,35 @@ for (s in sites) {
   heights  <- microenv_heights(microenv)
   cc       <- build_clim_cache(microenv)
 
+  # Annual-mean scalar per height — used only for the site's own vertical
+  # climate range below (the minimum-width floor's reference scale), not for
+  # the niche bounds themselves.
   clim_scalars <- do.call(rbind, lapply(cc$clim_by_height, function(cl) {
     if (is.null(cl)) return(setNames(rep(NA_real_, length(VARS)), VARS))
     vapply(VARS, function(v) mean(cl[[v]], na.rm = TRUE), numeric(1))
   }))
   site_ranges[[s]] <- apply(clim_scalars, 2, function(x) diff(range(x, na.rm = TRUE)))
 
+  # Monthly-mean climate per height (12 rows x length(VARS)): each row
+  # averages that month's representative warm + cold day (48 hourly values),
+  # capturing within-year seasonal variation instead of one collapsed annual
+  # mean.
+  clim_monthly <- lapply(cc$clim_by_height, function(cl) {
+    if (is.null(cl)) return(matrix(NA_real_, nrow = 12, ncol = length(VARS), dimnames = list(NULL, VARS)))
+    sapply(VARS, function(v) vapply(1:12, function(m) mean(cl[[v]][cl$month == m], na.rm = TRUE), numeric(1)))
+  })
+
   obs_site <- niches[niches$Area_or_Site == s, ]
   for (i in seq_len(nrow(obs_site))) {
-    h   <- obs_site$Height_m[i]
-    sp  <- obs_site$FinalID[i]
-    cv  <- clim_scalars[which.min(abs(heights - h)), , drop = TRUE]
-    obs_clim_rows[[length(obs_clim_rows) + 1]] <- c(species = sp, cv)
+    h    <- obs_site$Height_m[i]
+    sp   <- obs_site$FinalID[i]
+    h_idx <- which.min(abs(heights - h))
+    # Augment this observation with all 12 within-year monthly conditions at
+    # its recorded height, instead of just that height's annual mean.
+    for (m in 1:12) {
+      obs_clim_rows[[length(obs_clim_rows) + 1]] <-
+        c(species = sp, clim_monthly[[h_idx]][m, ])
+    }
   }
   message(sprintf("  %s: %d observations, %d height tiers", s, nrow(obs_site), length(heights)))
 }
@@ -86,9 +114,10 @@ message(sprintf("Reference vertical climate range (max across sites): temp=%.2f 
 species_ids <- sort(unique(obs_df$species))
 niche_cache <- lapply(species_ids, function(sp) {
   clim_vals <- as.matrix(obs_df[obs_df$species == sp, VARS])
-  n_obs     <- nrow(clim_vals)
+  n_obs     <- nrow(clim_vals) / 12L  # each field observation contributes 12 monthly rows
   n_sites   <- length(unique(niches$Area_or_Site[niches$FinalID == sp]))
-  message(sprintf("%-30s %3d observations across %d site(s)", sp, n_obs, n_sites))
+  message(sprintf("%-30s %3d observations (%4d monthly data points) across %d site(s)",
+                  sp, n_obs, nrow(clim_vals), n_sites))
   niche_geometry(clim_vals, min_width)
 })
 names(niche_cache) <- species_ids

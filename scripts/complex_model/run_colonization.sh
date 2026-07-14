@@ -28,6 +28,8 @@ PARAMS=$2    # path to params RDS (e.g. data/params/p_poll.rds), or omit for lit
 
 EXPTAG=$3
 
-Rscript scripts/complex_model/run_colonization_onesite.R "$SITE" "$PARAMS" "$EXPTAG"
+HEIGHT_STEP=$4  # microenv height-tier spacing to run at (must already exist); default 0.25 if omitted
+
+Rscript scripts/complex_model/run_colonization_onesite.R "$SITE" "$PARAMS" "$EXPTAG" "$HEIGHT_STEP"
 
 

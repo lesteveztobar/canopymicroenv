@@ -10,6 +10,12 @@
 # fixed. Once found, update N_FOUNDERS_DEFAULT in make_params.R, re-run it,
 # and only then submit the rest (including via this script).
 #
+# run_colonization_onesite.R also takes an optional 4th arg, height_step
+# (microenv resolution to run at — must already exist), e.g.
+#   sbatch scripts/complex_model/run_colonization.sh Maquipucuna "$(pwd)/data/params/n_founders.rds" founder_number 0.25
+# Defaults to 0.25 (production resolution) if omitted — every job below runs
+# at that default unless this script is edited to pass a 4th argument.
+#
 # CAUTION: reproduction_factorial is a 125-combo factorial (p_poll x p_germ x
 # p_s1), much heavier than the other 5-value one-at-a-time sweeps — consider
 # running it for one site directly via run_colonization.sh before including

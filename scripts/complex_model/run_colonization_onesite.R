@@ -2,7 +2,7 @@
 # Canopy colonization model — vertical niche partitioning of epiphytic Maxillariinae
 # Runs one site × one parameter set. Designed to be called interactively or
 # from a SLURM job array:
-#   Rscript run_colonization_onesite.R <site> <params_file> <experiment_tag>
+#   Rscript run_colonization_onesite.R <site> <params_file> <experiment_tag> <height_step>
 #
 # Arguments (all optional — fall back to defaults if omitted):
 #   site           Site name matching Area_or_Site in combinedv3.csv
@@ -11,8 +11,15 @@
 #                  Default: uses the literature params defined below
 #   experiment_tag Label appended to output file names for identification
 #                  Default: "default"
+#   height_step    Microenv height-tier spacing to run at (must already exist —
+#                  see height_res_array.sh). Default: 0.25 (production
+#                  resolution — validated against 0.1m by
+#                  height_resolution_experiment.R, no significant outcome
+#                  difference, ~2x cheaper). Appended to the output filename
+#                  and log name whenever it isn't 0.1m, so runs at different
+#                  resolutions never silently overwrite each other.
 #
-# Output: data/processed/colonization_<site>_<tag>.rds
+# Output: data/processed/colonization_<site>_<tag>[_h<step>].rds
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 library(plotly)
@@ -24,14 +31,16 @@ source("scripts/complex_model/get_colonization.R")
 
 # ── Command-line arguments (for cluster / batch runs) ────────────────────────
 args         <- commandArgs(trailingOnly = TRUE)
-site_name    <- if (length(args) >= 1) args[1] else "Maquipucuna"
-params_file  <- if (length(args) >= 2) args[2] else NULL
-exp_tag      <- if (length(args) >= 3) args[3] else "default"
+site_name    <- if (length(args) >= 1 && nzchar(args[1])) args[1] else "Maquipucuna"
+params_file  <- if (length(args) >= 2 && nzchar(args[2])) args[2] else NULL
+exp_tag      <- if (length(args) >= 3 && nzchar(args[3])) args[3] else "default"
+height_step  <- if (length(args) >= 4 && nzchar(args[4])) as.numeric(args[4]) else 0.25
+manifest_suffix <- if (height_step != 0.1) sprintf("_h%.2f", height_step) else ""
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 dir.create(LOGS_DIR, recursive = TRUE, showWarnings = FALSE)
 log_file <- file.path(LOGS_DIR,
-  sprintf("colonization_%s_%s_%s.log", site_name, exp_tag,
+  sprintf("colonization_%s_%s%s_%s.log", site_name, exp_tag, manifest_suffix,
           format(Sys.time(), "%Y%m%d_%H%M%S")))
 log_msg <- function(msg) {
   stamped <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", msg)
@@ -41,7 +50,11 @@ log_msg <- function(msg) {
 log_msg("run_colonization_onesite.R started")
 
 # ── 1. Load microenvironment ──────────────────────────────────────────────────
-microenv_path <- file.path(PROCESSED_DIR, sprintf("microenv_%s.rds", site_name))
+microenv_path <- file.path(PROCESSED_DIR, sprintf("microenv_%s%s.rds", site_name, manifest_suffix))
+if (!file.exists(microenv_path)) {
+  stop(sprintf("No microenv at %s (height_step=%.2f) — run height_res_array.sh %s first.",
+              microenv_path, height_step, site_name))
+}
 microenv      <- readRDS(microenv_path)
 
 # If this RDS was saved before .weather was added, patch it once here.
@@ -105,14 +118,16 @@ if (!is.null(params_file) && file.exists(params_file)) {
 } else {
   log_msg("Using default literature params.")
   params <- list(
-    # ── s(z, e): survival ────────────────────────────────────────────────────
-    beta0S  = -0.24,  beta0J  =  0.41,  beta0A  =  1.73,
+    # ── s(z, e): survival (monthly-compounded — see survival_logit() in ────
+    # get_colonization.R for the p_month = p_annual^(1/12) derivation) ─────
+    beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
     beta1   =  0.10,
     z_S_min =  0.0,  z_S_max =  1.0,
     z_J_min =  1.0,  z_J_max =  7.0,
     z_A_min =  7.0,  z_A_max = 20.0,
-    # ── g(z'|z, e): growth / stage transitions ────────────────────────────
-    psi0S        = -3.30,  psi0J        = -2.70,
+    # ── g(z'|z, e): growth / stage transitions (monthly-compounded — ───────
+    # q_month = 1-(1-p_annual)^(1/12), see growth_prob() in get_colonization.R)
+    psi0S        = -3.30 - 2.577,  psi0J        = -2.70 - 2.619,
     beta_precip  =  3e-4,  beta_rh      =  0.010,
     sigma        =  0.10,  delta_z_base =  0.80,
     cost_repro   =  0.50,
@@ -171,7 +186,7 @@ if (length(swept_params) > 1) {
   # kill loses at most one block's worth of jobs instead of the whole sweep.
   checkpoint_var  <- swept_params[length(swept_params)]
   checkpoint_path <- file.path(PROCESSED_DIR,
-    sprintf("colonization_%s_%s_checkpoint.rds", site_name, exp_tag))
+    sprintf("colonization_%s_%s%s_checkpoint.rds", site_name, exp_tag, manifest_suffix))
   log_msg(sprintf("Factorial sweep %s: %d combos x %d reps on %d cores (checkpointing by %s to %s)...",
                   paste(swept_params, collapse = " x "), n_combos, N_REPS, N_CORES,
                   checkpoint_var, checkpoint_path))
@@ -198,13 +213,13 @@ if (length(swept_params) > 1) {
   N_CORES <- suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK", NA)))
   if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
   N_REPS <- if (!is.null(params$n_reps)) params$n_reps else 1
-  log_msg(sprintf("Starting colonization run [%s | %s]: %d replicate(s) on %d cores...",
-                  site_name, exp_tag, N_REPS, N_CORES))
+  log_msg(sprintf("Starting colonization run [%s | %s | height_step=%.2f]: %d replicate(s) on %d cores...",
+                  site_name, exp_tag, height_step, N_REPS, N_CORES))
   result <- run_replicated(params, n_reps = N_REPS, timesteps = 30, spinup = 5)
 }
 
 out_path <- file.path(PROCESSED_DIR,
-  sprintf("colonization_%s_%s.rds", site_name, exp_tag))
+  sprintf("colonization_%s_%s%s.rds", site_name, exp_tag, manifest_suffix))
 saveRDS(result, out_path)
 log_msg(sprintf("Done. Results saved to %s", out_path))
 

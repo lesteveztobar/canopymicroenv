@@ -15,6 +15,15 @@
 # Logistic survival probability for one stage given size and monthly climate.
 # logit(s) = β₀_stage + β₁·z + climate_penalties
 #
+# Applied once per month and compounded over 12 months (run_pass3_survive_
+# grow()) — survival must succeed every month, so beta0S/J/A are calibrated
+# such that p_month = p_annual^(1/12), i.e. 12 reference-condition months
+# compound back to the literature annual target (S: 0.44, J: 0.60, A: 0.85
+# at default beta0A). Passing an annual-target-calibrated intercept here
+# directly (logit^-1(beta0) == p_annual) would silently compound it 12x too
+# many times and crash the population almost every year — see methods.tex
+# for the derivation and the corresponding shifted parameter table.
+#
 # Light effect on S and J (Izuddin et al. 2018; Zotz 1998):
 #   swdown_rel = local swdown / site-mean swdown (computed in run_pass3).
 #   Seedlings benefit from increasing light up to site mean (mycorrhizal fungi
@@ -53,77 +62,36 @@ transition_logit <- function(psi0, precip_annual_mm, relhum_mean,
                          beta_rh * relhum_mean))))
 }
 
-# Annual pseudobulb size increment for adults, climate-scaled and with
-# optional cost-of-reproduction penalty.
-# Δz = delta_z_base × (P/P_ref) × (RH/RH_ref) + ε  [ε ~ N(0, σ/2)]
-# If fruited: Δz × cost_repro (Zotz 1998 — "reduced growth after fruiting")
-size_increment <- function(z_A, precip_annual, relhum_mean,
-                           delta_z_base, precip_ref, rh_ref, sigma,
-                           cost_repro, fruited, z_A_min, z_A_max) {
-  delta_z <- delta_z_base *
-    (precip_annual / precip_ref) *
-    (relhum_mean   / rh_ref) +
-    rnorm(1, 0, sigma * 0.5)
-  if (fruited) delta_z <- delta_z * cost_repro
-  return(pmin(z_A_max, pmax(z_A_min, z_A + delta_z)))
-}
+# size_increment() archived to archive.R — superseded by the vectorized
+# adult-size update inlined in run_pass3_survive_grow().
 
 # ── Vital rate functions ──────────────────────────────────────────────────────
 # Named following IPM notation: s(z,e), g(z'|z,e), p_r(z), f_s(z), p_est(e)
 # z  = pseudobulb length (cm) — state variable
 # e  = environmental vector [T, RH, precip, radiation] from microclimf
 
-# ── s(z, e): Survival probability ─────────────────────────────────────────────
-# Stage-structured logistic survival with stage-specific intercepts and climate
-# covariates. Size z within each stage is drawn from Uniform(stage_min, stage_max)
-# as an approximation (no individual size data; disclosed in methods).
-# Form: logit(s) = β₀_stage + β₁·z + climate_terms
-# β₀ intercepts calibrated to match annual survival rates per stage:
-#   S: ~0.44 (Mondragón et al. 2007, Zotz 1998)
-#   J: ~0.60 (Winkler et al. 2009 — mean across species)
-#   A: ~0.85 (Zotz & Schmidt 2006, Borrero et al. 2023)
-# Climate effects:
-#   Seedlings: RH-dependent (Zotz 1998 — "most deaths during dry season")
-#   Adults:    temperature-dependent — heat stress above 23°C (Olaya-Arenas 2011)
-# Sources: Zotz (1998), Olaya-Arenas et al. (2011), Izuddin et al. (2018),
-#          Mondragón et al. (2007), Winkler et al. (2009), Zotz & Schmidt (2006)
-survive <- function(N, stage, clim_month, mean_swdown_site,
-                    beta0S = -0.24,   # logit intercept for S → annual s ≈ 0.44
-                    beta0J =  0.41,   # logit intercept for J → annual s ≈ 0.60
-                    beta0A =  1.73,   # logit intercept for A → annual s ≈ 0.85
-                    beta1  =  0.10,   # size effect (positive; larger = higher survival)
-                    z_S_min = 0,  z_S_max = 1,   # cm — seedling size range
-                    z_J_min = 1,  z_J_max = 7,   # cm — juvenile size range
-                    z_A_min = 7,  z_A_max = 20,  # cm — adult size range (min ~7cm: Zotz 2006)
-                    stochastic = FALSE) {
-  if (is.na(N) || N == 0) return(0L)
-  temp        <- mean(clim_month$temp,   na.rm = TRUE)
-  relhum      <- mean(clim_month$relhum, na.rm = TRUE)
-  swdown_mean <- mean(clim_month$swdown[clim_month$swdown > 0], na.rm = TRUE)
-  swdown_rel  <- if (!is.na(swdown_mean) && mean_swdown_site > 0)
-                   swdown_mean / mean_swdown_site else 1.0
-  z <- switch(stage,
-    S = runif(1, z_S_min, z_S_max),
-    J = runif(1, z_J_min, z_J_max),
-    A = runif(1, z_A_min, z_A_max))
-  s <- survival_logit(stage, z, temp, relhum, swdown_rel, beta0S, beta0J, beta0A, beta1)
-  return(if (stochastic) rbinom(1, N, s) else round(N * s))
-}
+# survive() archived to archive.R — superseded by the vectorized per-height
+# survival draw (.surv_slice()) inlined in run_pass3_survive_grow(). Its
+# core logic (survival_logit()) is still live and called directly there.
 
 # ── g(z'|z, e): Growth / stage transition probability ─────────────────────────
-# Logistic in annual precipitation and mean relative humidity.
+# Logistic in annual precipitation and mean relative humidity, evaluated
+# monthly and compounded across the year (run_pass3_survive_grow()) — a
+# transition is an "at least once this year" event, so the intercepts below
+# are calibrated so the monthly complement (1 - q_month) compounds to the
+# annual target: q_month = 1 - (1 - p_annual)^(1/12). At reference conditions
+# (2500 mm/yr, 85% RH) this gives:
+#   P(S→J) ≈ 0.18/yr (q_month ≈ 0.0164)  →  mean time in seedling stage: ~5-6 yr
+#   P(J→A) ≈ 0.25/yr (q_month ≈ 0.0237)  →  mean time to maturity: ~4 yr
+# Consistent with "germination to maturity estimated to reach or exceed a decade"
+#   — Schmidt & Zotz (2002), cited in Zotz & Schmidt (2006).
 # "Annual rainfall significantly affected growth of smaller orchid individuals"
 #   — Zotz & Schmidt (2006). "Precipitation increase → faster juvenile growth"
 #   — Mondragón et al. (2009).
-# At reference conditions (2500 mm/yr, 85% RH) this gives:
-#   P(S→J) ≈ 0.18  →  mean time in seedling stage: ~5-6 yr
-#   P(J→A) ≈ 0.25  →  mean time to maturity: ~4 yr
-# Consistent with "germination to maturity estimated to reach or exceed a decade"
-#   — Schmidt & Zotz (2002), cited in Zotz & Schmidt (2006).
 # Sources: Zotz & Schmidt (2006), Mondragón et al. (2009), Izuddin et al. (2018)
 growth_prob <- function(stage, precip_annual_mm, relhum_mean,
-                        psi0S       = -3.30,  # S→J intercept
-                        psi0J       = -2.70,  # J→A intercept
+                        psi0S       = -5.877,  # S→J intercept (monthly-compounded)
+                        psi0J       = -5.319,  # J→A intercept (monthly-compounded)
                         beta_precip =  3e-4,  # precipitation slope (Zotz 2006)
                         beta_rh     =  0.010) { # RH slope (Izuddin 2018)
   psi0 <- switch(stage,
@@ -132,58 +100,9 @@ growth_prob <- function(stage, precip_annual_mm, relhum_mean,
   return(transition_logit(psi0, precip_annual_mm, relhum_mean, beta_precip, beta_rh))
 }
 
-# ── g(z'|z, e) applied: Advance individuals and update adult size ──────────────
-# Wraps growth_prob() for stage transitions (S→J, J→A).
-# Also computes the annual size increment for adults (Δz) and applies the
-# cost-of-reproduction penalty directly to Δz for cells that fruited.
-#
-# Annual pseudobulb growth:
-#   Δz = delta_z_base × (precip / precip_ref) × (rh / rh_ref) + ε
-#   where delta_z_base ≈ 0.8 cm/yr (mean from Zotz 1998 Fig. 3, adults).
-#   Fruiting individuals: Δz ← Δz × cost_repro (= ×0.5), so ~0.4 cm/yr.
-#   "After reproduction, plants showed reduced vegetative growth" — Zotz (1998).
-# Sources: Zotz (1998), Zotz & Schmidt (2006), Mondragón et al. (2009)
-grow <- function(nS, nJ, nA, z_A, clim_year, fruited = FALSE,
-                 psi0S        = -3.30,
-                 psi0J        = -2.70,
-                 beta_precip  =  3e-4,
-                 beta_rh      =  0.010,
-                 sigma        =  0.10,   # individual stochasticity (Raventós 2015)
-                 delta_z_base =  0.80,   # mean adult annual growth cm/yr (Zotz 1998)
-                 precip_ref   =  2500,   # reference precipitation (mm/yr)
-                 rh_ref       =  85,     # reference RH (%)
-                 cost_repro   =  0.50,   # Δz multiplier after fruiting (Zotz 1998)
-                 z_A_min      =  7.0,
-                 z_A_max      = 20.0) {
-  nS  <- if (is.na(nS))  0L   else nS
-  nJ  <- if (is.na(nJ))  0L   else nJ
-  nA  <- if (is.na(nA))  0L   else nA
-  z_A <- if (is.na(z_A) || z_A < z_A_min) z_A_min else z_A
-
-  # clim_year has 48 rows (representative warm + cold hours across the year).
-  # precip is the mean hourly ERA5 value; scale to annual by × 8760 hours.
-  precip_annual <- mean(clim_year$precip, na.rm = TRUE) * 8760
-  relhum_mean   <- mean(clim_year$relhum, na.rm = TRUE)
-
-  p_StoJ <- growth_prob("S", precip_annual, relhum_mean, psi0S, psi0J, beta_precip, beta_rh)
-  p_JtoA <- growth_prob("J", precip_annual, relhum_mean, psi0S, psi0J, beta_precip, beta_rh)
-
-  epsilon <- rnorm(1, 0, sigma)
-  p_StoJ  <- pmin(1, pmax(0, p_StoJ + epsilon))
-  p_JtoA  <- pmin(1, pmax(0, p_JtoA + epsilon))
-
-  n_StoJ <- rbinom(1, nS, p_StoJ)
-  n_JtoA <- rbinom(1, nJ, p_JtoA)
-
-  z_A_new <- size_increment(z_A, precip_annual, relhum_mean,
-                            delta_z_base, precip_ref, rh_ref, sigma,
-                            cost_repro, fruited, z_A_min, z_A_max)
-
-  list(nS  = nS - n_StoJ,
-       nJ  = nJ + n_StoJ - n_JtoA,
-       nA  = nA + n_JtoA,
-       z_A = z_A_new)
-}
+# grow() archived to archive.R — superseded by the vectorized stage-
+# transition + adult-size update inlined in run_pass3_survive_grow().
+# growth_prob() above is still live and called directly there.
 
 # ── p_r(z): Flowering probability ─────────────────────────────────────────────
 # Logistic in pseudobulb size z (cm).
@@ -220,7 +139,8 @@ fruit_number <- function(z, a = -1.0, b = 0.12, stochastic = FALSE) {
 #   — McCormick & Jacquemyn (2014). Default 0.001 (McCormick & Jacquemyn 2014).
 # p_s1: first-year seedling survival. "Fewer than 50% of seedlings survived
 #   the first dry season" — Zotz (1998). Default 0.45.
-# z is the tracked mean pseudobulb size (cm) for the cell, updated annually by grow().
+# z is the tracked mean pseudobulb size (cm) for the cell, updated annually
+# by the adult size-update step in run_pass3_survive_grow().
 # Sources: Zotz (1998), Zotz & Schmidt (2006), Raventós (2015),
 #          McCormick & Jacquemyn (2014)
 reproduce <- function(N, z,
@@ -236,26 +156,10 @@ reproduce <- function(N, z,
   else floor(seeds) + rbinom(1, 1, seeds - floor(seeds))
 }
 
-# ── p_est(e): Establishment probability ───────────────────────────────────────
-# Probability that a dispersed seed germinates and survives to the seedling stage,
-# as a function of local microclimate. Humidity and light are the key covariates.
-# "Relative humidity influenced survival of 4/11 species" — Izuddin et al. (2018).
-# "Humus presence and microsite (fork) drove survival and growth" — Izuddin (2018).
-# Light (swdown) modulates establishment: too little → mycorrhizal fungus absent;
-# too much → desiccation. Ratio to site mean captures relative openness.
-# p_germ is the baseline mycorrhizal-gated germination probability.
-# Sources: McCormick & Jacquemyn (2014), Izuddin et al. (2018), Zotz (1998)
-establish <- function(new_seeds, clim, mean_swdown_site,
-                      p_germ = 0.001, stochastic = FALSE) {
-  relhum_mean <- mean(clim$relhum, na.rm = TRUE)
-  swdown_mean <- mean(clim$swdown[clim$swdown > 0], na.rm = TRUE)
-  p_establish <- (relhum_mean / 100) *
-    min(swdown_mean / mean_swdown_site, 1) *
-    p_germ
-  established <- if (stochastic) rbinom(1, new_seeds, p_establish) > 0
-  else (new_seeds * p_establish) >= 0.1
-  if (established) 1L else 0L
-}
+# establish() archived to archive.R — superseded by the vectorized
+# per-height establishment draw inlined in run_pass2_establish(), which also
+# corrects the double-application of p_germ this archived version still has
+# (see run_pass2_establish() below for the current, corrected design).
 
 # ── d(x'|x): Dispersal kernel ─────────────────────────────────────────────────
 # Wind-mediated exponential dispersal with canopy attenuation.
@@ -294,10 +198,8 @@ disperse <- function(x, y, z, seeds, clim, height, canopy_z, a,
                 maxDispZ = maxDispZ)
 }
 
-# ── Density-dependent growth (unused in main loop — kept for future use) ──────
-# Ricker model for within-voxel density regulation if carrying capacity needed.
-ricker      <- function(N, r, K) N * exp(r * (1 - N / K))
-stochRicker <- function(N, r, K) rpois(1, lambda = ricker(N, r, K))
+# ricker()/stochRicker() archived to archive.R — never wired into the main
+# loop (Ricker model for within-voxel density regulation, kept for future use).
 
 # ── Climate helpers ───────────────────────────────────────────────────────────
 
@@ -553,12 +455,18 @@ build_forest <- function(landscape, heights, forestparams, site_obs, resolution)
                    else if (rel_h < 0.80) 4L
                    else                   5L
 
-          # Trunk zones: only the single column cell; crown zones: bell-shaped radius
+          # Trunk zones: only the single column cell; crown zones (3-5, starting
+          # at rel_h=0.30): bell-shaped radius. Domain must start at zone 3's
+          # actual lower boundary (0.30), not 0.5 — using 0.5 here previously
+          # made crown_fraction negative (and effective_r therefore negative,
+          # i.e. never satisfied by any horiz_dist >= 0) for the entire
+          # 0.30-0.50 sub-range, silently excluding that whole band from valid
+          # canopy habitat on every tree.
           in_tree <- if (jzone <= 2) {
             horiz_dist == 0
           } else {
-            crown_fraction <- (rel_h - 0.5) / 0.5       # 0 at zone 3 base, 1 at top
-            effective_r    <- cr * sin(crown_fraction * pi)  # peaks at 75% height
+            crown_fraction <- (rel_h - 0.30) / 0.70     # 0 at zone 3 base, 1 at top
+            effective_r    <- cr * sin(crown_fraction * pi)  # peaks at 65% height
             horiz_dist <= effective_r
           }
           if (!in_tree) next
@@ -571,7 +479,7 @@ build_forest <- function(landscape, heights, forestparams, site_obs, resolution)
           bark_area <- if (jzone <= 2) {
             2 * pi * forestparams$trunk_r * vox_h_m
           } else {
-            crown_fraction <- (rel_h - 0.5) / 0.5
+            crown_fraction <- (rel_h - 0.30) / 0.70
             eff_r_m        <- cr * resolution * sin(crown_fraction * pi)  # grid cells → m
             pi * eff_r_m^2 * forestparams$branch_density * vox_h_m
           }
@@ -809,12 +717,16 @@ run_pass2_establish <- function(state, abundanceS, abundanceJ, abundanceA,
                                      zi + pad, sp]
       if (sum(seeds_slice) == 0L) next
 
-      # p_establish: scalar for this height (spatial mean already in clim)
+      # p_establish: scalar for this height (spatial mean already in clim).
+      # No p_germ term here — mycorrhizal germination potential is already
+      # accounted for once, in Pass 1's fecundity kernel (reproduce()), so
+      # every dispersed seed has already "passed" that gate. This gate is
+      # purely site suitability (humidity/light) for a seed that already has
+      # germination potential.
       relhum_mean <- mean(clim$relhum, na.rm = TRUE)
       swdown_mean <- mean(clim$swdown[clim$swdown > 0], na.rm = TRUE)
       p_est <- (relhum_mean / 100) *
-               min(swdown_mean / p$mean_swdown_site, 1) *
-               p$p_germ
+               min(swdown_mean / p$mean_swdown_site, 1)
 
       # Gate by this species' realized climate niche (see get_niche() /
       # niche_match() in init_colonization()) — a height whose climate falls
@@ -872,12 +784,45 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
 
   for (sp in seq_len(state$n_species)) {
 
-    # ── s(z, e): monthly survival ─────────────────────────────────────────────
-    # Loop over heights × months — draw one z per stage (same approximation as
-    # before; individual size data not available) and apply vectorised rbinom.
+    # ── Monthly loop: survival, transitions, and growth are all evaluated per
+    # month and accumulated across the year, interleaved (survive -> maybe
+    # transition -> accrue growth, each month in sequence) rather than
+    # survival looping monthly while transitions/growth used one annual
+    # value — an individual must survive a given month to be eligible for
+    # anything else that month.
+    #
+    # Annual precipitation doesn't vary by month in this dataset (site-wide
+    # ERA5 constant, replicated across every row regardless of month tag) —
+    # only temperature and RH genuinely vary month to month. Growth's
+    # monthly increment therefore still uses the annual precip ratio.
+    #
+    # All three vital rates are calibrated (Table params_stable/varied) for
+    # what a SINGLE evaluation should reproduce ANNUALLY, so each is
+    # converted to its monthly-equivalent rate before being applied 12x:
+    #   survival: p_month = p_annual^(1/12) — must succeed every month
+    #     (multiplicative), so a straight 12th root recovers the annual rate.
+    #   transitions: q_month = 1-(1-p_annual)^(1/12) — "at least once this
+    #     year" event, so the complement (not-yet-transitioned probability)
+    #     is what compounds multiplicatively across months.
+    #   growth: delta_z_base/12 per month (additive, not compounded) — see
+    #     size_A update below.
+    # The corresponding intercepts (beta0S/J/A, psi0S/J) already encode this
+    # conversion; see methods.tex for the derivation.
     for (zi in seq_len(state$zDim)) {
       if (sum(abundanceS[,,zi,t,sp]) + sum(abundanceJ[,,zi,t,sp]) +
           sum(abundanceA[,,zi,t,sp]) == 0L) next
+
+      clim_year <- state$clim_by_height[[zi]]
+      if (is.null(clim_year)) next
+      precip_annual <- mean(clim_year$precip, na.rm = TRUE) * 8760
+
+      slS <- abundanceS[,,zi,t,sp]
+      slJ <- abundanceJ[,,zi,t,sp]
+      slA <- abundanceA[,,zi,t,sp]
+      slA_start     <- slA
+      n_JtoA_year   <- array(0L, dim = c(xDim, yDim))
+      za_slice      <- size_A[,,zi,t,sp]
+      delta_z_total <- array(0, dim = c(xDim, yDim))
 
       for (month in 1:12) {
         cm <- state$clim_month_by_height[[zi]][[month]]
@@ -888,67 +833,57 @@ run_pass3_survive_grow <- function(state, abundanceS, abundanceJ, abundanceA,
         swdown_rel  <- if (!is.na(swdown_mean) && p$mean_swdown_site > 0)
                          swdown_mean / p$mean_swdown_site else 1.0
 
+        # ── s(z,e): monthly survival ────────────────────────────────────────
         z_S <- runif(1, p$z_S_min, p$z_S_max)
         z_J <- runif(1, p$z_J_min, p$z_J_max)
-        # Use mean tracked adult size for the height slice (better than fixed draw)
-        z_A_mean <- mean(size_A[,,zi,t,sp][state$landscape[,,zi]], na.rm = TRUE)
+        z_A_mean <- mean(za_slice[state$landscape[,,zi]], na.rm = TRUE)
         if (is.na(z_A_mean) || z_A_mean < p$z_A_min) z_A_mean <- p$z_A_min
 
         s_S <- survival_logit("S", z_S,      temp, relhum, swdown_rel, p$beta0S, p$beta0J, p$beta0A, p$beta1)
         s_J <- survival_logit("J", z_J,      temp, relhum, swdown_rel, p$beta0S, p$beta0J, p$beta0A, p$beta1)
         s_A <- survival_logit("A", z_A_mean, temp, relhum, swdown_rel, p$beta0S, p$beta0J, p$beta0A, p$beta1)
 
-        abundanceS[,,zi,t,sp] <- .surv_slice(abundanceS[,,zi,t,sp], s_S)
-        abundanceJ[,,zi,t,sp] <- .surv_slice(abundanceJ[,,zi,t,sp], s_J)
-        abundanceA[,,zi,t,sp] <- .surv_slice(abundanceA[,,zi,t,sp], s_A)
+        slS <- .surv_slice(slS, s_S)
+        slJ <- .surv_slice(slJ, s_J)
+        slA <- .surv_slice(slA, s_A)
+
+        # ── g(z'|z,e): monthly stage transitions ────────────────────────────
+        p_StoJ <- growth_prob("S", precip_annual, relhum, p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
+        p_JtoA <- growth_prob("J", precip_annual, relhum, p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
+        epsilon <- rnorm(1, 0, p$sigma)
+        p_StoJ  <- pmin(1, pmax(0, p_StoJ + epsilon))
+        p_JtoA  <- pmin(1, pmax(0, p_JtoA + epsilon))
+
+        n_StoJ <- .surv_slice(slS, p_StoJ)
+        n_JtoA <- .surv_slice(slJ, p_JtoA)
+        slS <- slS - n_StoJ
+        slJ <- slJ + n_StoJ - n_JtoA
+        slA <- slA + n_JtoA
+        n_JtoA_year <- n_JtoA_year + n_JtoA
+
+        # ── Adult size increment: this month's share, own noise draw ────────
+        # sigma/sqrt(12) keeps total annual variance matched to the original
+        # (pre-monthly) calibration, since variances of independent draws sum.
+        dz_month <- (p$delta_z_base / 12) *
+                    (precip_annual / 2500) *
+                    (relhum        / 85) +
+                    rnorm(xDim * yDim, 0, p$sigma * 0.5 / sqrt(12))
+        dim(dz_month) <- c(xDim, yDim)
+        delta_z_total <- delta_z_total + dz_month
       }
-    }
 
-    # ── g(z'|z, e): annual stage transitions + adult size update ──────────────
-    for (zi in seq_len(state$zDim)) {
-      slS <- abundanceS[,,zi,t,sp]
-      slJ <- abundanceJ[,,zi,t,sp]
-      slA <- abundanceA[,,zi,t,sp]
-      if (sum(slS) + sum(slJ) + sum(slA) == 0L) next
+      abundanceS[,,zi,t,sp] <- slS
+      abundanceJ[,,zi,t,sp] <- slJ
+      abundanceA[,,zi,t,sp] <- slA
 
-      clim_year <- state$clim_by_height[[zi]]
-      if (is.null(clim_year)) next
-
-      precip_annual <- mean(clim_year$precip, na.rm = TRUE) * 8760
-      relhum_mean   <- mean(clim_year$relhum, na.rm = TRUE)
-
-      p_StoJ <- growth_prob("S", precip_annual, relhum_mean,
-                            p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
-      p_JtoA <- growth_prob("J", precip_annual, relhum_mean,
-                            p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
-      # Add shared stochastic perturbation (same epsilon for all cells at this height)
-      epsilon <- rnorm(1, 0, p$sigma)
-      p_StoJ  <- pmin(1, pmax(0, p_StoJ + epsilon))
-      p_JtoA  <- pmin(1, pmax(0, p_JtoA + epsilon))
-
-      n_StoJ <- .surv_slice(slS, p_StoJ)
-      n_JtoA <- .surv_slice(slJ, p_JtoA)
-
-      abundanceS[,,zi,t,sp] <- slS - n_StoJ
-      abundanceJ[,,zi,t,sp] <- slJ + n_StoJ - n_JtoA
-      abundanceA[,,zi,t,sp] <- slA + n_JtoA
-
-      # ── Adult size update (vectorised over xy) ────────────────────────────────
-      za_slice <- size_A[,,zi,t,sp]
-      # Draw delta_z for every cell; mask to adult-occupied cells afterwards
-      delta_z <- p$delta_z_base *
-                 (precip_annual / 2500) *
-                 (relhum_mean   / 85) +
-                 rnorm(xDim * yDim, 0, p$sigma * 0.5)
-      dim(delta_z) <- c(xDim, yDim)
-      # Cost of reproduction: halve delta_z where the cell fruited this year
+      # Cost of reproduction: reduce the year's total growth where the cell fruited
       fr_slice <- fruited[,,zi,sp]
-      delta_z[fr_slice] <- delta_z[fr_slice] * p$cost_repro
-      za_new <- pmin(p$z_A_max, pmax(p$z_A_min, za_slice + delta_z))
-      # Cells newly promoted from J (no prior adults) start at z_A_min
-      fresh <- n_JtoA > 0L & slA == 0L
+      delta_z_total[fr_slice] <- delta_z_total[fr_slice] * p$cost_repro
+      za_new <- pmin(p$z_A_max, pmax(p$z_A_min, za_slice + delta_z_total))
+      # Cells newly promoted from J this year (no adults at year start) start at z_A_min
+      fresh <- n_JtoA_year > 0L & slA_start == 0L
       za_new[fresh] <- p$z_A_min
-      # Only write back where adults exist (preserve z_A_min in empty cells)
+      # Only write back where adults exist (preserve prior value in empty cells)
       has_adult <- abundanceA[,,zi,t,sp] > 0L
       za_slice[has_adult] <- za_new[has_adult]
       size_A[,,zi,t,sp] <- za_slice
@@ -1134,7 +1069,10 @@ plot_3d_abundance_animated <- function(result, out_path = NULL) {
     plotly::animation_slider(currentvalue = list(prefix = "Year: "))
 
   if (!is.null(out_path)) {
-    htmlwidgets::saveWidget(fig, out_path, selfcontained = TRUE)
+    # selfcontained=TRUE needs pandoc (not installed on the cluster); FALSE
+    # writes a small "<name>_files/" dependency folder alongside the HTML
+    # instead -- keep the two together when copying/viewing elsewhere.
+    htmlwidgets::saveWidget(fig, out_path, selfcontained = FALSE)
     message("Saved: ", out_path)
   }
   invisible(fig)
@@ -1337,7 +1275,7 @@ runcolonization <- function(site, niches, canopy_grid, microenv,
        obs_train=niches_train, obs_val=niches_val)
 }
 
-run_one <- function(params, tag = "run", timesteps = 20, spinup = 3, clim_cache = NULL) {
+run_one <- function(params, tag = "run", timesteps = 20, spinup = 3, clim_cache = NULL, seed = 42) {
   tryCatch(
     runcolonization(
       site         = site,
@@ -1352,7 +1290,8 @@ run_one <- function(params, tag = "run", timesteps = 20, spinup = 3, clim_cache 
       Visualize    = FALSE,
       parameters   = params,
       forestparams = forestparams,
-      clim_cache   = clim_cache
+      clim_cache   = clim_cache,
+      seed         = seed
     ),
     error = function(e) {
       # run_experiment() wraps this call in suppressMessages(), so a plain
@@ -1394,7 +1333,8 @@ run_experiment <- function(param_name, values, base = base_params,
     # Suppress log_msg inside workers
     suppressMessages(
       r <- run_one(p, tag = sprintf("%s=%s rep%d", param_name, val, rep),
-                   timesteps = timesteps, spinup = spinup, clim_cache = clim_cache)
+                   timesteps = timesteps, spinup = spinup, clim_cache = clim_cache,
+                   seed = i)
     )
     if (is.null(r)) return(NULL)
     T <- timesteps
@@ -1455,7 +1395,7 @@ run_factorial_experiment <- function(param_values, base = base_params,
     tag <- paste0(tag, sprintf(" rep%d", jobs$rep[i]))
     suppressMessages(
       r <- run_one(p, tag = tag, timesteps = timesteps, spinup = spinup,
-                  clim_cache = clim_cache)
+                  clim_cache = clim_cache, seed = i)
     )
     if (is.null(r)) return(NULL)
     T <- timesteps
@@ -1519,7 +1459,7 @@ run_replicated <- function(params, n_reps = 1, timesteps = 20, spinup = 3,
   runs <- mclapply(seq_len(n_reps), function(rep) {
     suppressMessages(
       r <- run_one(params, tag = sprintf("rep%d", rep), timesteps = timesteps,
-                  spinup = spinup, clim_cache = clim_cache)
+                  spinup = spinup, clim_cache = clim_cache, seed = rep)
     )
     r
   }, mc.cores = min(N_CORES, n_reps))

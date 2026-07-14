@@ -93,15 +93,54 @@ GENUS_STOPWORDS = {
     "diversity", "richness", "canopy", "zone", "zones", "figure1",
     "author", "authors", "corresponding", "university", "institute",
     "department", "faculty", "received", "accepted", "published", "doi",
+    # Common Spanish/French/German function words and title-case nouns
+    # that keep showing up as fake "genus" hits from reference-list
+    # entries, institution names, and PDF download watermarks.
+    "del", "de", "la", "las", "los", "el", "un", "una", "en", "y", "und",
+    "des", "der", "die", "das",
+    "informe", "secretaria", "secretaría", "centro", "centenario",
+    "sustentabilidad", "protección", "proteccion", "especies", "nativas",
+    "drought", "tolerance", "neotropical", "rican", "orchid", "life",
+    "comparisons", "among", "indicate", "four", "type", "form", "final",
+    "statement", "ethical", "archiv", "asuntos", "universitats",
+    "landesbibliothek", "download", "downloaded", "terms", "conditions",
+    "wiley", "library", "online", "elsevier", "springer", "copyright",
+    "editor", "editors", "editorial",
 }
 SPECIES_EPITHET_STOPWORDS = {
     "et", "al", "sp", "spp", "cf", "aff", "nov", "var", "subsp", "ex",
     "auct", "sensu", "lato", "stricto",
+    "del", "de", "la", "las", "los", "el", "un", "una", "en", "y", "und",
+    "des", "der", "die", "das",
+    "informe", "secretaria", "secretaría", "centro", "centenario",
+    "sustentabilidad", "protección", "proteccion", "especies", "nativas",
+    "drought", "tolerance", "neotropical", "rican", "orchid", "life",
+    "comparisons", "among", "indicate", "four", "fruiting", "bark",
+    "type", "form", "final", "statement", "ethical", "naturwissenschaftlicher",
+    "download", "downloaded", "terms", "conditions", "ambiental",
 }
+# Real genus/species epithets essentially never run this long as a single
+# word; anything past it is almost certainly a rotated-page spacing
+# reconstruction failure (multiple words merged with no space at all).
+MAX_GENUS_LEN = 20
+MAX_EPITHET_LEN = 25
 AUTHOR_TAIL_RE = re.compile(
     r'^\s*(?:\([A-ZÀ-Ý][A-Za-zà-ÿ\.]*\)\s*)?'
     r'[A-ZÀ-Ý][A-Za-zà-ÿ]*\.?(?:\s*[&,]\s*[A-ZÀ-Ý][A-Za-zà-ÿ\.]*)*'
 )
+# A parenthetical family name right after a binomial -- "Baudouinia
+# fluggeiformis (Fabaceae)" -- looks like AUTHOR_TAIL_RE's optional
+# "(X.)" author-abbreviation group, but it isn't one: it's the family
+# annotation used throughout "Host taxa." lists. Whatever capitalized
+# word happens to follow (often just the *next* list item's genus) must
+# not be mistaken for a continuing author citation.
+FAMILY_PAREN_RE = re.compile(r'^\s*\([A-ZÀ-Ý][a-zà-ÿ]+(?:aceae|idae)\)')
+
+
+def _has_author_tail(tail):
+    if FAMILY_PAREN_RE.match(tail):
+        return False
+    return bool(AUTHOR_TAIL_RE.match(tail))
 
 # ── DATE / MONTH TABLES ──────────────────────────────────────────────────────
 
@@ -383,6 +422,18 @@ def best_date(candidates):
 BINOMIAL_RE = re.compile(r'\b([A-Z][a-zà-ÿ]{2,})\s+([a-zà-ÿ][a-zà-ÿ\-]{2,})\b')
 
 
+def _is_plausible_binomial(genus, epithet):
+    """Stopword + length sanity check shared by both species scanners."""
+    g, e = genus.lower(), epithet.lower().rstrip('-')
+    if g in GENUS_STOPWORDS:
+        return False
+    if e in GENUS_STOPWORDS or e in SPECIES_EPITHET_STOPWORDS:
+        return False
+    if len(genus) > MAX_GENUS_LEN or len(epithet) > MAX_EPITHET_LEN:
+        return False
+    return True
+
+
 def find_species_candidates(text):
     """
     Returns a list of dicts: genus, species, raw, start, end, has_author.
@@ -393,12 +444,10 @@ def find_species_candidates(text):
     out = []
     for m in BINOMIAL_RE.finditer(text):
         genus, epithet = m.groups()
-        if genus.lower() in GENUS_STOPWORDS:
-            continue
-        if epithet.lower() in GENUS_STOPWORDS or epithet.lower() in SPECIES_EPITHET_STOPWORDS:
+        if not _is_plausible_binomial(genus, epithet):
             continue
         tail = text[m.end():m.end() + 30]
-        has_author = bool(AUTHOR_TAIL_RE.match(tail))
+        has_author = _has_author_tail(tail)
         out.append({
             'genus': genus, 'species': epithet, 'raw': m.group(0),
             'start': m.start(), 'end': m.end(), 'has_author': has_author,
@@ -423,10 +472,10 @@ def species_heading_candidates(text):
         if not m:
             continue
         genus, epithet = m.groups()
-        if genus.lower() in GENUS_STOPWORDS or epithet.lower() in GENUS_STOPWORDS:
+        if not _is_plausible_binomial(genus, epithet):
             continue
         tail = line[m.end():m.end() + 40]
-        if AUTHOR_TAIL_RE.match(tail):
+        if _has_author_tail(tail):
             out.append({
                 'genus': genus, 'species': epithet,
                 'start': line_match.start(1), 'end': line_match.end(1),
@@ -498,20 +547,32 @@ POSITION_CATEGORY_RE = re.compile(
     r'\bevenly\s+distributed\b', re.I)
 
 
+# A height mention near these phrases describes the *forest/tree* canopy
+# at the site level (like CanopyHeight_m), not this species' own
+# above-ground position -- e.g. "mean canopy height ... ranged from 9 to
+# 16 m" is a site statistic that would otherwise get misattributed as a
+# co-occurring epiphyte's Height_m purely because they share a block.
+CANOPY_CONTEXT_RE = re.compile(
+    r'canopy\s+height|mean\s+canopy|canopy\s+cover|tree\s+height|'
+    r'forest\s+canopy|phorophyte\s+height', re.I)
+
+
 def find_height_evidence(text):
     """
     Best-effort free-text height evidence in `text`:
     returns dict(height_m, height_min, height_max, basis, raw) or None.
     """
-    m = HEIGHT_RANGE_RE.search(text)
-    if m:
+    for m in HEIGHT_RANGE_RE.finditer(text):
+        if CANOPY_CONTEXT_RE.search(text[max(0, m.start() - 150):m.start()]):
+            continue
         lo, hi = float(m.group(1)), float(m.group(2))
         if lo < 100 and hi < 100:  # guard against catching elevation ranges
             basis = 'AGH_range' if AGH_LABEL_RE.search(text) else 'height_range'
             return {'height_m': round((lo + hi) / 2, 2), 'height_min': lo,
                     'height_max': hi, 'basis': basis, 'raw': m.group(0)}
-    m = HEIGHT_POINT_RE.search(text)
-    if m:
+    for m in HEIGHT_POINT_RE.finditer(text):
+        if CANOPY_CONTEXT_RE.search(text[max(0, m.start() - 150):m.start()]):
+            continue
         val = float(m.group(1))
         if val < 100:
             return {'height_m': val, 'height_min': None, 'height_max': None,
@@ -769,6 +830,45 @@ def _reconstruct_rotated_page(page, page_num):
 
 # ── PDF LOADING ──────────────────────────────────────────────────────────────
 
+def _strip_running_headers_footers(pages, min_page_frac=0.3, min_pages=3):
+    """
+    Repository download watermarks ("Downloaded from ... by Universitats
+    und Landesbibliothek ...", running page headers repeating the paper
+    title, etc.) show up on nearly every page and are indistinguishable
+    from real content to the regex scanners -- they've produced fake
+    "species" rows in practice. Detect them generically: any line (after
+    normalizing digits, which absorb page numbers/dates) that recurs on a
+    large fraction of pages is boilerplate, not paper content, and is
+    stripped from every page before further processing.
+    """
+    n_pages = len(pages)
+    if n_pages < min_pages:
+        return pages
+    norm_counts = {}
+    per_page_lines = []
+    for _, text in pages:
+        lines = text.split('\n')
+        per_page_lines.append(lines)
+        seen = set()
+        for line in lines:
+            stripped = line.strip()
+            if len(stripped) < 15:
+                continue
+            norm = re.sub(r'\d+', '#', stripped)
+            if norm not in seen:
+                norm_counts[norm] = norm_counts.get(norm, 0) + 1
+                seen.add(norm)
+    threshold = max(min_pages, int(n_pages * min_page_frac))
+    boilerplate = {norm for norm, cnt in norm_counts.items() if cnt >= threshold}
+    if not boilerplate:
+        return pages
+    cleaned = []
+    for (pnum, _text), lines in zip(pages, per_page_lines):
+        kept = [l for l in lines if re.sub(r'\d+', '#', l.strip()) not in boilerplate]
+        cleaned.append((pnum, '\n'.join(kept)))
+    return cleaned
+
+
 def load_pdf(pdf_path):
     """Returns (pages, tables): pages=[(num,text)], tables=[(num,table)]."""
     if pdfplumber is None:
@@ -791,6 +891,7 @@ def load_pdf(pdf_path):
     if rotated_pages:
         print(f"  [i] recovered {len(rotated_pages)} rotated/sideways page(s): "
               f"{rotated_pages} (de-rotated via character-position reconstruction)")
+    pages = _strip_running_headers_footers(pages)
     return pages, tables
 
 
@@ -839,6 +940,30 @@ def guess_fallback_date(all_text):
 
 # ── ROW ASSEMBLY ─────────────────────────────────────────────────────────────
 
+# "Host taxa. Genus species (Family), ..." lists the phorophyte(s) of the
+# epiphyte a treatment section is actually about -- not new observations.
+HOST_BLOCK_RE = re.compile(r'^\s*Host\s+tax(?:a|on)\b', re.I)
+# Darwin-Core-style treatment sections often glue several labeled
+# sub-parts together with no blank line between them (e.g. a species
+# heading immediately followed by "Remarks. ... Host taxa. ..." as one
+# block). Catching only whole-block-starts-with-"Host taxa" (above)
+# misses these; this finds each label's position *within* a block so we
+# can tell which labeled sub-part a given match actually falls under.
+SECTION_LABEL_RE = re.compile(
+    r'(?:^|\n)[ \t]*(Identification|Remarks|Host\s+tax(?:a|on)|Distribution|'
+    r'Material\s+examined|Observations?)\s*\.', re.I)
+
+
+def _preceding_section_label(block, pos):
+    """Lowercased label of the sub-section `pos` falls in, or None."""
+    label = None
+    for m in SECTION_LABEL_RE.finditer(block):
+        if m.start() > pos:
+            break
+        label = m.group(1).lower()
+    return label
+
+
 def _split_blocks(text):
     """Splits page text into paragraph-ish blocks on blank lines."""
     blocks, cur, start = [], [], 0
@@ -858,17 +983,44 @@ def _split_blocks(text):
     return blocks
 
 
+def _collect_host_species(pages):
+    """
+    (genus_lower, species_lower) pairs named in a "Host taxa."/"Host
+    taxon." labeled sub-section anywhere in the document. These same
+    host trees are often *also* named elsewhere with a fully valid
+    author citation of their own (in a host-species summary table, or in
+    running prose praising a "diverse host tree") -- genuinely
+    well-formed taxonomic names, just not the epiphyte a treatment is
+    about. Once we've seen a name explicitly labeled as a host, treat
+    every other mention of that same name in this document as the same
+    host too, not a coincidental new epiphyte.
+    """
+    hosts = set()
+    for _, text in pages:
+        for _start, block in _split_blocks(text):
+            if not SECTION_LABEL_RE.search(block):
+                continue
+            for c in find_species_candidates(block):
+                label = _preceding_section_label(block, c['start'])
+                if label and label.startswith('host'):
+                    hosts.add((c['genus'].lower(), c['species'].lower()))
+    return hosts
+
+
 def build_rows(pages, tables, source, site, verbose=False):
     all_text = '\n'.join(t for _, t in pages)
     fallback_coords = find_coordinates(all_text)
     fallback_coord = fallback_coords[0] if fallback_coords else None
     fallback_elev, _ = find_elevation(all_text)
     fallback_date = guess_fallback_date(all_text)
+    known_hosts = _collect_host_species(pages)
 
     rows = {}  # (genus_lower, species_lower) -> row dict
 
     def get_row(genus, species):
         key = (genus.lower(), species.lower())
+        if key in known_hosts:
+            return None
         if key not in rows:
             rows[key] = {
                 'Source': source, 'Area_or_Site': site,
@@ -895,6 +1047,8 @@ def build_rows(pages, tables, source, site, verbose=False):
     zone_evidence = parse_zone_tables(tables)
     for (g_lo, s_lo), ent in zone_evidence.items():
         row = get_row(ent['genus'], ent['species'])
+        if row is None:
+            continue
         row['_page'].add(ent['page'])
         if ent['zone_counts']:
             zc = ', '.join(f"{k}={v}" for k, v in sorted(ent['zone_counts'].items()))
@@ -929,6 +1083,8 @@ def build_rows(pages, tables, source, site, verbose=False):
             if heading is None:
                 continue
             row = get_row(heading['genus'], heading['species'])
+            if row is None:
+                continue
             row['_page'].add(page_num)
             row['lat'], row['lon'] = rec['lat'], rec['lon']
             row['_lat_lon_basis'] = 'per-observation record'
@@ -957,6 +1113,11 @@ def build_rows(pages, tables, source, site, verbose=False):
     #    in as that species' local evidence.
     for page_num, text in pages:
         for start, block in _split_blocks(text):
+            if HOST_BLOCK_RE.match(block):
+                # "Host taxa. Baudouinia fluggeiformis (Fabaceae), ..." --
+                # these are the phorophyte(s) of the epiphyte this section
+                # is actually about, not new epiphyte observations.
+                continue
             candidates = {}
             for h in species_heading_candidates(block):
                 candidates[(h['genus'], h['species'])] = h
@@ -967,7 +1128,16 @@ def build_rows(pages, tables, source, site, verbose=False):
                 continue
 
             for genus, species in candidates:
+                cand = candidates[(genus, species)]
+                label = _preceding_section_label(block, cand['start'])
+                if label and label.startswith('host'):
+                    # Named only inside this block's "Host taxa."
+                    # sub-part -- it's the phorophyte, not a new
+                    # epiphyte observation.
+                    continue
                 row = get_row(genus, species)
+                if row is None:
+                    continue
                 row['_page'].add(page_num)
 
                 coords = find_coordinates(block)
