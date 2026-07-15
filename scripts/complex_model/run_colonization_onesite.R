@@ -2,7 +2,7 @@
 # Canopy colonization model — vertical niche partitioning of epiphytic Maxillariinae
 # Runs one site × one parameter set. Designed to be called interactively or
 # from a SLURM job array:
-#   Rscript run_colonization_onesite.R <site> <params_file> <experiment_tag> <height_step>
+#   Rscript run_colonization_onesite.R <site> <params_file> <experiment_tag> <height_step> <species_file>
 #
 # Arguments (all optional — fall back to defaults if omitted):
 #   site           Site name matching Area_or_Site in combinedv3.csv
@@ -18,6 +18,25 @@
 #                  difference, ~2x cheaper). Appended to the output filename
 #                  and log name whenever it isn't 0.1m, so runs at different
 #                  resolutions never silently overwrite each other.
+#   species_file   Path to an RDS file containing a character vector of
+#                  FinalID values (see combinedv3.csv) -- REPLACES the
+#                  modeled species list with exactly this set, instead of
+#                  every species observed at the site (see
+#                  init_colonization()'s params$species_subset,
+#                  get_colonization.R). A listed species doesn't need to
+#                  have been observed at this site -- e.g. to ask "how would
+#                  species X, characterized from other sites, do in a
+#                  landscape it's never been recorded in?" A species with no
+#                  local observations here gets its niche-match ceiling from
+#                  this landscape's own best-available height instead of a
+#                  local realized-presence height (see niche_ceiling()) --
+#                  a genuinely weaker claim, since it says nothing about
+#                  whether the species could actually establish here.
+#                  Separate from params_file so the same subset can be
+#                  reused across any sensitivity experiment without
+#                  duplicating it into every params list. Build one with e.g.
+#                  saveRDS(c("SpeciesA", "SpeciesB"), "data/params/species_subset.rds")
+#                  Default: NULL (model every species observed at the site).
 #
 # Output: data/processed/colonization_<site>_<tag>[_h<step>].rds
 # Lizeth Estévez Tobar — University of Bonn, 2026
@@ -35,6 +54,7 @@ site_name    <- if (length(args) >= 1 && nzchar(args[1])) args[1] else "Maquipuc
 params_file  <- if (length(args) >= 2 && nzchar(args[2])) args[2] else NULL
 exp_tag      <- if (length(args) >= 3 && nzchar(args[3])) args[3] else "default"
 height_step  <- if (length(args) >= 4 && nzchar(args[4])) as.numeric(args[4]) else 0.25
+species_file <- if (length(args) >= 5 && nzchar(args[5])) args[5] else NULL
 manifest_suffix <- if (height_step != 0.1) sprintf("_h%.2f", height_step) else ""
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -142,10 +162,7 @@ if (!is.null(params_file) && file.exists(params_file)) {
     # output is ~0.001/adult/year at founder size (z=z_A_min) — with only
     # ~30 founders that's still under 1 expected seed/year, so this may need
     # to go higher once real run results come back thin.
-    n_founders = 30,
-    # Realized climate niche tolerance (see get_niche()/niche_match()); 0 =
-    # raw observed range, no padding.
-    niche_pad = 0
+    n_founders = 30
   )
 }
 # canopy_z is site-specific (mean canopy height); always set it from this
@@ -153,7 +170,12 @@ if (!is.null(params_file) && file.exists(params_file)) {
 # params file may have carried.
 params$canopy_z <- mean_canopy
 if (is.null(params$n_founders)) params$n_founders <- 30
-if (is.null(params$niche_pad))  params$niche_pad  <- 0
+if (!is.null(species_file)) {
+  if (!file.exists(species_file)) stop("No species_file at ", species_file)
+  params$species_subset <- readRDS(species_file)
+  log_msg(sprintf("species_file: restricting to %d species from %s",
+                  length(params$species_subset), species_file))
+}
 
 # ── 6. Sanity check ───────────────────────────────────────────────────────────
 clim_test <- get_clim(available_heights[1], microenv)

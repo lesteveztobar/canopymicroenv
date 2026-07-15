@@ -1,8 +1,17 @@
 #!/bin/bash
 # run_plots.sh — generate every project plot from whatever results exist in
 # data/processed/ and geojson_to_csv/. Safe to re-run any time.
-# Usage: sh scripts/complex_model/run_plots.sh   (or bash scripts/complex_model/run_plots.sh)
+# Usage: sh scripts/complex_model/run_plots.sh          (local/interactive node)
+#        sbatch scripts/complex_model/run_plots.sh      (SLURM)
 # Run from: /home/s38leste_hpc/canopymicroenv/
+#
+#SBATCH --partition=lm_short
+#SBATCH --account=ag_biob_scabral
+#SBATCH --time=02:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=200G
+#SBATCH --output=/home/s38leste_hpc/canopymicroenv/logs/log_%j.out
 # ─────────────────────────────────────────────────────────────────────────────
 
 module purge

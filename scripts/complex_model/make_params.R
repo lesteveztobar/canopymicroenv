@@ -165,32 +165,6 @@ n_founders = N_FOUNDERS_DEFAULT
 out_path <- file.path(PARAMS_DIR, "beta_precip.rds")
 saveRDS(params_betaprecip, out_path)
 
-# ── Establishment: niche tolerance pad ──────────────────────────────────────────
-# Sweeps how much to pad each species' realized climate niche (see
-# get_niche()/niche_match() in get_colonization.R) beyond its raw observed
-# range. 0 = no padding (often a single point given how few observations
-# most species have — get_niche()'s min_width floor keeps pad meaningful
-# even then); larger values progressively relax the niche gate.
-params_nichepad <- list(
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
-beta1   =  0.10,
-z_S_min =  0.0,  z_S_max =  1.0,
-z_J_min =  1.0,  z_J_max =  7.0,
-z_A_min =  7.0,  z_A_max = 20.0,
-psi0S        = -3.30 - 2.577,  psi0J        = -2.70 - 2.619,
-beta_precip  =  3e-4,  beta_rh      =  0.010,
-sigma        =  0.10,  delta_z_base =  0.80,
-cost_repro   =  0.50,
-p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
-# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
-lambda = 1,  Ut = 1,
-n_founders = N_FOUNDERS_DEFAULT,
-niche_pad = c(0, 0.005, 0.01, 0.05)
-)
-
-out_path <- file.path(PARAMS_DIR, "niche_pad.rds")
-saveRDS(params_nichepad, out_path)
-
 # ── Spin-up: founder count ──────────────────────────────────────────────────────
 # Sweeps n_founders per species (see get_colonization.R::run_spinup()) —
 # decoupled from field observation count. Run this experiment alone first:
@@ -287,6 +261,17 @@ saveRDS(params_reprofactorial, out_path)
 #   p_germ:     0.0001, 0.0005, 0.001 (default), 0.005, 0.01 (best_case)
 #   p_s1:       0.15, 0.30, 0.45 (default), 0.60, 0.90 (best_case)
 # Still 5^4 = 625 combinations, same cost as v1.
+#
+# SUPERSEDED by params_reprofactorial_v3 below, after realistic.rds and
+# best_case.rds were both actually run to completion (2026-07-14):
+# realistic.rds (literature defaults throughout) collapses toward extinction
+# (total abundance 59.8 -> 17.8 -> 5.6 over 30 years, all-adult, no
+# recruitment behind it -- see data/processed/colonization_Maquipucuna_
+# realistic_h0.25.rds), while best_case.rds sustains ~2200 adults through
+# year 30. v2's levels still included sub-realistic values (e.g. p_poll=0.15
+# is below realistic's 0.30) that are now known to be uninformative -- if
+# realistic itself dies, anything below it dies too. Left here for
+# provenance only.
 params_reprofactorial_v2 <- list(
 beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
 beta1   =  0.10,
@@ -307,6 +292,47 @@ n_founders = c(10, 30, 100, 300, 1000)
 
 out_path <- file.path(PARAMS_DIR, "reproduction_factorial_v2.rds")
 saveRDS(params_reprofactorial_v2, out_path)
+
+# ── Reproduction factorial v3: bracketed realistic -> best_case ────────────────
+# realistic.rds and best_case.rds are now the two confirmed endpoints of the
+# question this factorial is answering: literature-default reproduction
+# collapses (realistic), maximally-favourable reproduction sustains ~2200
+# adults (best_case). v3 drops every sub-realistic level from v2 and instead
+# takes 5 evenly-spaced (linear) levels from each parameter's realistic value
+# up to its best_case value, inclusive, for all four factorial parameters --
+# still fully crossed, still 5^4 = 625 combinations, same cost as v1/v2, just
+# spending every combination inside the range that's actually informative.
+# Everything else (survival/growth/dispersal) stays at literature defaults,
+# same as v1/v2, so the result still isolates the recruitment threshold:
+#   n_founders: 30, 273, 515, 758, 1000
+#   p_poll:     0.30, 0.45, 0.60, 0.75, 0.90
+#   p_germ:     0.00100, 0.00325, 0.00550, 0.00775, 0.01000
+#   p_s1:       0.450, 0.563, 0.675, 0.788, 0.900
+# Levels are linearly spaced (not log-spaced) for simplicity, per the
+# starting-coarse approach here -- if the persistence transition turns out to
+# sit close to the realistic end of a given parameter's range, a follow-up
+# sweep can re-space that parameter logarithmically or narrow the range
+# further around wherever the transition actually falls.
+params_reprofactorial_v3 <- list(
+beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta1   =  0.10,
+z_S_min =  0.0,  z_S_max =  1.0,
+z_J_min =  1.0,  z_J_max =  7.0,
+z_A_min =  7.0,  z_A_max = 20.0,
+psi0S        = -3.30 - 2.577,  psi0J        = -2.70 - 2.619,
+beta_precip  =  3e-4,  beta_rh      =  0.010,
+sigma        =  0.10,  delta_z_base =  0.80,
+cost_repro   =  0.50,
+p_poll  = c(0.30, 0.45, 0.60, 0.75, 0.90),
+p_germ  = c(0.00100, 0.00325, 0.00550, 0.00775, 0.01000),
+p_s1    = c(0.450, 0.563, 0.675, 0.788, 0.900),
+# canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
+lambda = 1,  Ut = 1,
+n_founders = c(30, 273, 515, 758, 1000)
+)
+
+out_path <- file.path(PARAMS_DIR, "reproduction_factorial_v3.rds")
+saveRDS(params_reprofactorial_v3, out_path)
 
 # ── Best case: everything pushed as favourable as possible ─────────────────────
 # Every lever more generous than anything tested so far in the OAT sweeps or
@@ -330,7 +356,6 @@ p_poll  = 0.90,  p_germ  = 0.01,  p_s1 = 0.90,           # beyond anything teste
 # canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
 lambda = 1,  Ut = 1,
 n_founders = 1000,                                       # beyond the 800 max tested
-niche_pad  = 0.5,                                         # far beyond the 0.05 max tested
 n_reps     = 5
 )
 
@@ -362,7 +387,6 @@ p_poll  = 0.30,  p_germ  = 0.001,  p_s1 = 0.45,
 # canopy_z omitted — site-specific, overwritten by run_colonization_onesite.R
 lambda = 1,  Ut = 1,
 n_founders = N_FOUNDERS_DEFAULT,
-niche_pad  = 0,
 n_reps     = 5
 )
 

@@ -18,6 +18,9 @@ plot_site_map()
 cat("\n== Temperature profiles ==\n")
 for (site in SITES) plot_temperature_profile(site)
 
+cat("\n== Niche suitability (per-axis + before/after normalization) ==\n")
+for (site in SITES) plot_niche_suitability(site)
+
 cat("\n== Best-fit 3D comparison (simple model) ==\n")
 plot_bestfit_3d_comparison()
 
@@ -28,20 +31,22 @@ for (site in SITES) {
   }
 }
 
-cat("\n== Reproduction factorial (p_poll x p_germ x p_s1) ==\n")
-for (site in SITES) {
-  plot_factorial_experiment(site, "reproduction_factorial")
-}
+cat("\n== Reproduction factorial (p_poll x p_germ x p_s1 x n_founders) ==\n")
+# reproduction_factorial_v3: levels bracketed realistic.rds -> best_case.rds
+# (see report/methods.tex, Full factorial experiment). Only Maquipucuna has
+# a v3 result so far -- add more sites here as they land in data/processed/.
+plot_factorial_experiment("Maquipucuna", "reproduction_factorial_v3_h0.25")
 
 cat("\n== Default (unswept) colonization runs ==\n")
 for (site in SITES) {
   plot_default_colonization_run(site)
 }
 
-cat("\n== Best-case (persistence validation) run ==\n")
-# Only Maquipucuna has a post-p_germ-fix best-case run so far (see
-# report/methods.tex, Persistence validation) -- add more sites here as
-# their own best_case_h0.25 results land in data/processed/.
+cat("\n== Persistence validation runs (best-case / realistic) ==\n")
+# Only Maquipucuna has post-p_germ-fix runs so far (see report/methods.tex,
+# Persistence validation) -- add more sites here as their own
+# best_case_h0.25 / realistic_h0.25 results land in data/processed/.
 plot_default_colonization_run("Maquipucuna", exp_tag = "best_case_h0.25")
+plot_default_colonization_run("Maquipucuna", exp_tag = "realistic_h0.25")
 
 cat("\nAll done. Plots (where inputs existed) are in", OUTPUT_DIR, "\n")

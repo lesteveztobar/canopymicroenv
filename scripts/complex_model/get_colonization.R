@@ -307,61 +307,122 @@ build_clim_cache <- function(microenv) {
 }
 
 # ── Species climate niche ──────────────────────────────────────────────────────
-# Realized niche per species: the range of each climate variable at the
-# heights where that species was actually observed, centred on the observed
-# midpoint and guaranteed at least `min_width_frac` of the SITE's full
-# vertical climate range wide — even at pad = 0. Earlier version padded
-# proportionally to the raw observed width with a small absolute floor
-# (0.5 C / 5% RH); that failed silently because pad=0 means 0 x anything = 0
-# regardless of the floor, and observed ranges here are ~0.1 C wide (2-3
-# observations per species, often at similar heights) — so *no* pad level
-# ever produced a niche wider than the observed range, gating establishment
-# to a handful of height tiers out of 55 regardless of every other
-# parameter. A floor expressed as a fraction of the site's own vertical
-# climate range is a physically meaningful minimum tolerance instead of an
-# arbitrary constant, and applies unconditionally so pad=0 still yields a
-# usable niche. pad > 0 widens further beyond that floor.
+# Realized niche per species, one axis per climate variable (temp, relhum,
+# swdown — as many axes as variables, per prof feedback 2026-07-15). Each
+# axis gets a continuous 0-100 suitability score: a kernel-density ratio of
+# the species' observed ("presence") values for that variable against
+# "background" — the full pooled distribution of that variable actually
+# available across the landscape (every height tier x month, every site) —
+# rescaled so the axis's own peak is 100.
+#
+# The three axis scores are combined in two steps (prof feedback
+# 2026-07-15 + follow-up 2026-07-15):
+#   1. Geometric mean of the three axis scores — the scale-consistent way to
+#      "multiply, then normalize back to 100" (unlike dividing by a fixed
+#      100^2, which just relabels the units without undoing the shrinkage:
+#      three axes at 80/100 would divide down to 51.2, not stay near 80).
+#      Still enforces "bad on any one axis tanks the whole score" (a 0 on
+#      any axis still gives 0 overall), just without extra punishment for
+#      being merely imperfect everywhere.
+#   2. Rescale by a per-species, per-site "ceiling" — the best geometric-mean
+#      score this species actually achieves at its own observed presence
+#      heights on THIS site (niche_ceiling(), attached to each niche in
+#      init_colonization() below). This exists because the three axes'
+#      individual optima essentially never coincide at one real height tier
+#      (temp, RH, and light don't peak together in a vertical profile), so
+#      even a species' best real height might only geometric-mean to ~50-60
+#      without this step — which would cap suitability well below 100
+#      everywhere and risk exactly the "I will never get a suitable niche"
+#      failure the multiply-then-normalize request was meant to avoid. The
+#      realized niche is, by definition, where the species is actually
+#      found, so those exact spots are rescaled to read ~100.
+#
+# This replaces the earlier hard [lo,hi] box + tolerance "pad": with only
+# 2-3 observations per species the raw observed range was ~0.1 C wide, so
+# pad=0 (no widening) gated establishment to almost nothing regardless of
+# every other parameter, and pad>0 was an arbitrary fudge factor to fix it.
+# A density-ratio score doesn't need a pad — the kernel bandwidth already
+# determines how far suitability extends beyond the observed values, and
+# every axis decays smoothly to ~0 once you're beyond where that variable
+# is seen anywhere in the landscape (its own threshold), which is exactly
+# the failure case the pad used to be needed for.
 #
 # Takes the already-computed heights/clim_by_height (from init_colonization,
 # via build_clim_cache) rather than re-deriving climate from microenv, since
 # re-reading every height tier's raster from disk here would otherwise
 # duplicate the same expensive I/O.
-#
-# The pad-independent geometry (mid, base_half_width) and the pad-application
-# step are factored out into niche_geometry()/apply_niche_pad() below so the
-# same math can be reused by characterize_niches.R, which pools observations
-# across *all* sites for a species instead of just the one being modeled —
-# see scripts/characterize_niches.R and init_colonization()'s cache lookup.
+NICHE_VARS   <- c("temp", "relhum", "swdown")
+NICHE_GRID_N <- 512
 
-# Pad-independent niche geometry from a matrix of observed climate values
-# (rows = observations, cols = variables) and a per-variable minimum width.
-# Centred on the observed midpoint; base_half_width is guaranteed at least
-# min_width/2 regardless of how narrow the raw observed range is.
-niche_geometry <- function(clim_vals, min_width) {
-  lo  <- apply(clim_vals, 2, min, na.rm = TRUE)
-  hi  <- apply(clim_vals, 2, max, na.rm = TRUE)
-  mid <- (lo + hi) / 2
-  base_half_width <- pmax((hi - lo) / 2, min_width / 2)
-  list(mid = mid, base_half_width = base_half_width)
+# Mean of variable `v` in climate table `cl`. swdown drops zero/night-time
+# readings first, consistent with every other swdown use in this file
+# (run_pass2_establish(), survival_logit(), .niche_matching_canopy()) — a
+# mean that included every dark hour would just be diluted by a fixed
+# day/night ratio rather than reflecting daytime irradiance. temp/relhum use
+# every reading.
+.niche_var_mean <- function(cl, v) {
+  if (identical(v, "swdown")) return(mean(cl[[v]][cl[[v]] > 0], na.rm = TRUE))
+  mean(cl[[v]], na.rm = TRUE)
 }
 
-# Apply a tolerance pad to a niche_geometry() result, producing the final
-# lo/hi box used by niche_match(). pad=0 keeps the geometry's guaranteed
-# minimum width; pad>0 widens further beyond it.
-apply_niche_pad <- function(geom, pad) {
-  half_width <- geom$base_half_width * (1 + pad)
-  list(lo = geom$mid - half_width, hi = geom$mid + half_width)
+# Kernel density of `vals` on a shared grid spanning [from, to]. density()'s
+# own default bandwidth extension already tapers close to zero near both
+# ends, so no separate hard threshold is needed on top of it.
+.density_grid <- function(vals, from, to, n = NICHE_GRID_N) {
+  vals <- vals[is.finite(vals)]
+  if (length(vals) < 2 || diff(range(vals)) == 0) {
+    # Degenerate (every value identical, or a single point): fall back to a
+    # one-cell spike at that value so the ratio below stays well-defined.
+    x <- seq(from, to, length.out = n)
+    y <- as.numeric(abs(x - mean(vals)) <= (to - from) / n)
+    return(list(x = x, y = y))
+  }
+  d <- density(vals, from = from, to = to, n = n)
+  list(x = d$x, y = d$y)
 }
 
-get_niche <- function(site_obs, heights, clim_by_height, vars = c("temp", "relhum"),
-                      pad = 0, min_width_frac = 0.10) {
-  clim_scalars <- do.call(rbind, lapply(clim_by_height, function(cl) {
+# Background: the pooled distribution of each climate variable across every
+# voxel-month actually present in the landscape (bg_vals is a data.frame/
+# list with one column per variable) — the "available but not necessarily
+# occupied" reference every species' presence values are scored against.
+build_background_density <- function(bg_vals, vars = NICHE_VARS, n = NICHE_GRID_N) {
+  setNames(lapply(vars, function(v) {
+    x <- bg_vals[[v]][is.finite(bg_vals[[v]])]
+    .density_grid(x, min(x), max(x), n)
+  }), vars)
+}
+
+# Per-species niche model: for each variable, the presence/background
+# density ratio on the background's own grid, normalized so its own peak is
+# 100. clim_vals: matrix of observed values, rows = observations, one column
+# per variable in `vars`.
+niche_density_model <- function(clim_vals, bg_density, vars = NICHE_VARS) {
+  axes <- setNames(lapply(vars, function(v) {
+    bg    <- bg_density[[v]]
+    pres  <- .density_grid(clim_vals[, v], min(bg$x), max(bg$x), length(bg$x))
+    ratio <- pres$y / pmax(bg$y, 1e-8)
+    ratio[!is.finite(ratio)] <- 0
+    score <- if (max(ratio) > 0) 100 * ratio / max(ratio) else rep(0, length(ratio))
+    list(x = bg$x, score = score)
+  }), vars)
+  list(axes = axes)
+}
+
+# Mean climate per height tier (one row per height, one column per variable)
+# — the per-height lookup shared by get_niche()'s this-site fallback and by
+# niche_ceiling()'s per-site rescale below.
+height_clim_scalars <- function(clim_by_height, vars = NICHE_VARS) {
+  do.call(rbind, lapply(clim_by_height, function(cl) {
     if (is.null(cl)) return(setNames(rep(NA_real_, length(vars)), vars))
-    vapply(vars, function(v) mean(cl[[v]], na.rm = TRUE), numeric(1))
+    vapply(vars, function(v) .niche_var_mean(cl, v), numeric(1))
   }))
-  site_range <- apply(clim_scalars, 2, function(x) diff(range(x, na.rm = TRUE)))
-  min_width  <- min_width_frac * site_range
+}
 
+# This-site-only fallback for a species missing from the pooled cross-site
+# cache (see init_colonization()) — same density-ratio model, but scored
+# against this one site's own background instead of the pooled one.
+get_niche <- function(site_obs, heights, clim_by_height, bg_density, vars = NICHE_VARS) {
+  clim_scalars <- height_clim_scalars(clim_by_height, vars)
   obs_clim <- function(h) clim_scalars[which.min(abs(heights - h)), , drop = TRUE]
 
   species_ids <- sort(unique(site_obs$FinalID))
@@ -369,26 +430,105 @@ get_niche <- function(site_obs, heights, clim_by_height, vars = c("temp", "relhu
     obs_sp <- site_obs[site_obs$FinalID == sp & !is.na(site_obs$Height_m), ]
     if (nrow(obs_sp) == 0) return(NULL)
     clim_vals <- do.call(rbind, lapply(obs_sp$Height_m, obs_clim))
-    apply_niche_pad(niche_geometry(clim_vals, min_width), pad)
+    niche_density_model(clim_vals, bg_density, vars)
   })
   names(niches) <- species_ids
   niches
 }
 
-# Fraction of niche variables whose value at a given height/time falls within
-# a species' (padded) niche box — 1 = matches on every variable, 0 = outside
-# on all of them. A species with no usable observations (niche = NULL) isn't
-# gated at all (returns 1), since we have no basis to restrict it.
+# 0-100 suitability of a single variable's value on one niche axis (linear
+# interpolation over the precomputed grid; constant beyond the grid's edges,
+# where the score is already ~0).
+niche_axis_score <- function(value, axis) {
+  if (is.null(axis) || is.null(value) || is.na(value)) return(NA_real_)
+  approx(axis$x, axis$score, xout = value, rule = 2)$y
+}
+
+# 0-100 score per axis for a set of climate values (e.g. c(temp=.., relhum=..,
+# swdown=..)) under a species' niche. NULL niche (no usable observations)
+# returns NULL — caller decides how to treat "no basis to score".
+niche_axis_scores <- function(clim_values, niche) {
+  if (is.null(niche)) return(NULL)
+  vapply(names(niche$axes), function(v) {
+    niche_axis_score(clim_values[[v]], niche$axes[[v]])
+  }, numeric(1))
+}
+
+# Geometric mean of a set of 0-100 scores — the scale-consistent way to
+# "multiply, then normalize back to 100" (see header note above). A 0 on any
+# axis still gives 0 overall (can't take log(0)); NAs are dropped.
+.geomean <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) return(100)
+  if (any(x <= 0)) return(0)
+  exp(mean(log(x)))
+}
+
+# Combined 0-100 suitability BEFORE the per-site ceiling rescale (see
+# niche_ceiling()) — the geometric mean of the axis scores. A species with no
+# usable observations (niche = NULL) isn't gated at all (returns 100), since
+# there's no basis to restrict it.
+niche_raw_score <- function(clim_values, niche) {
+  scores <- niche_axis_scores(clim_values, niche)
+  if (is.null(scores) || all(is.na(scores))) return(100)
+  .geomean(scores)
+}
+
+# The best niche_raw_score() this species achieves on THIS site — the
+# per-site "ceiling" that niche_overall_score() rescales against, so that
+# the best-matching height reads ~100 regardless of whether the three axes'
+# individual optima ever coincide at one real height tier (they usually
+# don't — see header note above).
+#
+# Two modes, chosen by whether the species has any local observations:
+#   - Species observed at this site: ceiling = best score among its OWN
+#     observed presence heights (obs_clim_vals) — the Hutchinsonian
+#     "realized niche is where it's actually found" framing.
+#   - Species with NO observations at this site (e.g. named via
+#     params$species_subset to ask "how would this species, characterized
+#     elsewhere, do in a landscape it's never been recorded in?"):
+#     obs_clim_vals is empty, so this falls back to landscape_clim_vals —
+#     every height tier actually present at this site — and the ceiling
+#     becomes "the best this landscape's own vertical profile could offer,"
+#     since there's no real presence to anchor to instead. This is a
+#     genuinely different, weaker claim than the observed-presence case (it
+#     says nothing about whether the species could actually establish here,
+#     only how the landscape's best height compares to its niche elsewhere)
+#     — see init_colonization()'s species_subset log message, which reports
+#     which species used which mode.
+#
+# obs_clim_vals / landscape_clim_vals: matrices of climate rows (rows =
+# observations or height tiers, one column per NICHE_VARS), as produced by
+# height_clim_scalars() + obs_clim() lookups. Falls back to 100 (no rescale)
+# if neither has anything to compute a ceiling from.
+niche_ceiling <- function(niche, obs_clim_vals, landscape_clim_vals = NULL) {
+  candidates <- if (!is.null(obs_clim_vals) && nrow(obs_clim_vals) > 0) {
+    obs_clim_vals
+  } else {
+    landscape_clim_vals
+  }
+  if (is.null(niche) || is.null(candidates) || nrow(candidates) == 0) return(100)
+  raw <- apply(candidates, 1, function(row) niche_raw_score(as.list(row), niche))
+  m <- max(raw, na.rm = TRUE)
+  if (!is.finite(m) || m <= 0) 100 else m
+}
+
+# Combined 0-100 suitability AFTER the per-site ceiling rescale — the value
+# actually used to gate establishment. Clamped at 100 since a voxel other
+# than the species' own best-observed height can still exceed that height's
+# raw score. niche$ceiling is attached per site in init_colonization() (via
+# niche_ceiling() above); niches without one (e.g. evaluated outside a site
+# context) fall back to no rescale.
+niche_overall_score <- function(clim_values, niche) {
+  raw <- niche_raw_score(clim_values, niche)
+  ceiling <- if (!is.null(niche) && !is.null(niche$ceiling)) niche$ceiling else 100
+  min(100, 100 * raw / ceiling)
+}
+
+# Fraction-of-1 form used to gate establishment probability (p_est <-
+# p_est * niche_match(...)) — see run_pass2_establish().
 niche_match <- function(clim_values, niche) {
-  if (is.null(niche)) return(1)
-  vars <- names(niche$lo)
-  hits <- vapply(vars, function(v) {
-    val <- clim_values[[v]]
-    if (is.null(val) || is.na(val)) return(NA)
-    val >= niche$lo[[v]] && val <= niche$hi[[v]]
-  }, logical(1))
-  if (all(is.na(hits))) return(1)
-  mean(hits, na.rm = TRUE)
+  niche_overall_score(clim_values, niche) / 100
 }
 
 # ── Forest structure ──────────────────────────────────────────────────────────
@@ -512,7 +652,30 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
   xDim <- max(round(lon_range_m / resolution), 10) + 4
   yDim <- max(round(lat_range_m / resolution), 10) + 4
 
+  # Species actually observed at this site. params$species_subset (optional
+  # -- see run_colonization_onesite.R's species_file arg) REPLACES this list
+  # rather than narrowing it, so it can also name a species never observed
+  # at this site at all -- e.g. "how would species X, characterized from
+  # other sites, do in a landscape it's never been recorded in?" (a species
+  # in the subset still needs *some* niche to score against -- either from
+  # species_niches.rds, characterize_niches.R's cross-site cache, or from
+  # this site's own get_niche() fallback below -- a species with neither is
+  # simply unrestricted, same as any species with no usable observations).
+  # site_obs itself is NOT filtered by the subset -- it still drives the
+  # landscape's physical spatial extent (lat/lon range above) and stays
+  # available for other species' per-observation lookups, so a species list
+  # that adds or removes species never changes the modeled landscape itself.
+  # See niche_ceiling() below for how a species with no local observations
+  # at this site gets its per-site ceiling instead.
   species_ids <- sort(unique(site_obs$FinalID))
+  if (!is.null(params$species_subset)) {
+    requested  <- sort(unique(params$species_subset))
+    n_foreign  <- sum(!requested %in% species_ids)
+    species_ids <- requested
+    log_msg(sprintf(
+      "params$species_subset: modeling %d species (%d observed at this site, %d not -- scored against this landscape's best-available height instead of a local ceiling)",
+      length(species_ids), length(species_ids) - n_foreign, n_foreign))
+  }
   n_species   <- length(species_ids)
   sp_index    <- setNames(seq_along(species_ids), species_ids)
 
@@ -576,11 +739,9 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
   log_msg(sprintf("Valid climate heights: %d/%d | mean_swdown: %.1f",
                   length(valid_clim), zDim, mean_swdown_site))
 
-  # Per-species realized climate niche, gating establishment in
-  # run_pass2_establish() — see get_niche()/niche_match(). niche_pad = 0
-  # still yields a usable (site-relative minimum-width) niche, not a
-  # zero-width point; make_params.R's niche_pad experiment sweeps pad to
-  # widen further beyond that floor.
+  # Per-species realized climate niche (temp/relhum/swdown density-ratio
+  # model — see niche_density_model()/niche_match() above), gating
+  # establishment in run_pass2_establish().
   #
   # Prefer the pooled cross-site cache from characterize_niches.R (every
   # observation of a species across all 5 sites, not just this one) if it
@@ -588,32 +749,71 @@ init_colonization <- function(site, niches, canopy_grid, microenv,
   # only 2-3 records at one site may have several more elsewhere. Falls back
   # to this-site-only get_niche() for any species the cache doesn't cover
   # (e.g. added to the field data since the cache was last regenerated), or
-  # entirely if the cache doesn't exist at all.
-  niche_pad     <- if (!is.null(params$niche_pad)) params$niche_pad else 0
+  # entirely if the cache doesn't exist at all — scored against this site's
+  # own background distribution in that case.
+  # species_ids already computed above (and filtered by params$species_subset
+  # if set) -- reused here rather than re-deriving from site_obs, so a
+  # restricted subset also skips the niche-scoring work below for every
+  # species that isn't in it.
   niche_cache_path <- file.path(PROCESSED_DIR, "species_niches.rds")
-  species_ids   <- sort(unique(site_obs$FinalID))
   niches_by_species <- setNames(vector("list", length(species_ids)), species_ids)
 
   cached_geom <- if (file.exists(niche_cache_path)) readRDS(niche_cache_path) else NULL
   missing_from_cache <- character(0)
   for (sp in species_ids) {
     if (!is.null(cached_geom) && !is.null(cached_geom[[sp]])) {
-      niches_by_species[[sp]] <- apply_niche_pad(cached_geom[[sp]], niche_pad)
+      niches_by_species[[sp]] <- cached_geom[[sp]]
     } else {
       missing_from_cache <- c(missing_from_cache, sp)
     }
   }
   if (length(missing_from_cache) > 0) {
+    # Background: every height tier's monthly climate at this site (day-
+    # filtered swdown, via .niche_var_mean) — same granularity as the
+    # cross-site background characterize_niches.R builds, just for one site.
+    site_bg_rows <- do.call(rbind, lapply(clim_month_by_height, function(by_month) {
+      do.call(rbind, lapply(by_month, function(cm) {
+        if (is.null(cm) || nrow(cm) == 0) return(NULL)
+        as.data.frame(as.list(setNames(
+          vapply(NICHE_VARS, function(v) .niche_var_mean(cm, v), numeric(1)), NICHE_VARS)))
+      }))
+    }))
+    site_bg <- build_background_density(site_bg_rows)
     fallback <- get_niche(site_obs[site_obs$FinalID %in% missing_from_cache, ],
-                          heights, clim_by_height, pad = niche_pad)
+                          heights, clim_by_height, site_bg)
     niches_by_species[missing_from_cache] <- fallback[missing_from_cache]
   }
 
   n_cached <- length(species_ids) - length(missing_from_cache)
   log_msg(sprintf(
-    "Niche pad %.3f: %d/%d species have a usable observed niche (%d from cross-site cache, %d this-site-only)",
-    niche_pad, sum(!sapply(niches_by_species, is.null)), n_species,
+    "%d/%d species have a usable observed niche (%d from cross-site cache, %d this-site-only)",
+    sum(!sapply(niches_by_species, is.null)), n_species,
     n_cached, length(missing_from_cache)))
+
+  # Attach each niche's per-site ceiling (see niche_ceiling()/
+  # niche_overall_score() above): the best score this species actually
+  # achieves at its own observed presence heights on THIS site, so those
+  # exact spots rescale to ~100 regardless of which cache the niche came
+  # from. A species with no local observations here (e.g. a foreign species
+  # named via params$species_subset -- see above) falls back to the best
+  # score among every height tier actually present in this landscape
+  # instead, so it still gets a meaningful 0-100 answer to "how well does
+  # this landscape's best available height match my niche?" rather than no
+  # rescale at all.
+  height_scalars      <- height_clim_scalars(clim_by_height)
+  landscape_clim_vals <- height_scalars[stats::complete.cases(height_scalars), , drop = FALSE]
+  obs_clim_at         <- function(h) height_scalars[which.min(abs(heights - h)), , drop = TRUE]
+  n_landscape_ceiling <- 0L
+  for (sp in species_ids) {
+    if (is.null(niches_by_species[[sp]])) next
+    obs_sp <- site_obs[site_obs$FinalID == sp & !is.na(site_obs$Height_m), ]
+    obs_clim_vals <- if (nrow(obs_sp) > 0) do.call(rbind, lapply(obs_sp$Height_m, obs_clim_at)) else NULL
+    if (is.null(obs_clim_vals)) n_landscape_ceiling <- n_landscape_ceiling + 1L
+    niches_by_species[[sp]]$ceiling <- niche_ceiling(niches_by_species[[sp]], obs_clim_vals, landscape_clim_vals)
+  }
+  if (n_landscape_ceiling > 0) log_msg(sprintf(
+    "%d species have no local observations at this site -- ceiling based on this landscape's best-available height instead",
+    n_landscape_ceiling))
 
   params$a                <- a
   params$mean_swdown_site <- mean_swdown_site
@@ -728,13 +928,13 @@ run_pass2_establish <- function(state, abundanceS, abundanceJ, abundanceA,
       p_est <- (relhum_mean / 100) *
                min(swdown_mean / p$mean_swdown_site, 1)
 
-      # Gate by this species' realized climate niche (see get_niche() /
-      # niche_match() in init_colonization()) — a height whose climate falls
-      # outside where the species was actually observed is less likely to be
-      # colonized, tempered by params$niche_pad.
+      # Gate by this species' realized climate niche (temp/relhum/swdown
+      # density-ratio model — see niche_density_model()/niche_match() in
+      # init_colonization()) — a height whose climate falls outside where the
+      # species was actually observed is less likely to be colonized.
       niche_sp <- state$niches_by_species[[state$species_ids[sp]]]
       p_est <- p_est * niche_match(
-        list(temp = mean(clim$temp, na.rm = TRUE), relhum = relhum_mean),
+        list(temp = mean(clim$temp, na.rm = TRUE), relhum = relhum_mean, swdown = swdown_mean),
         niche_sp
       )
 
@@ -1083,12 +1283,21 @@ plot_3d_abundance_animated <- function(result, out_path = NULL) {
 # Founders: n_founders individuals per species (a fixed, decoupled count —
 # not tied to however many field observations that species happens to have),
 # placed at random canopy voxels whose local climate matches that species'
-# realized niche (see get_niche()/niche_match()). Previously founders were
-# placed only at the exact voxel of an observed individual, which failed
-# whenever the stochastic forest didn't happen to mark that exact voxel as
-# canopy — with a handful of observations per site, that could (and did)
-# place zero founders across every replicate, guaranteeing extinction before
-# the simulation even started, independent of any vital-rate parameter.
+# realized niche (see niche_density_model()/niche_match()). Previously
+# founders were placed only at the exact voxel of an observed individual,
+# which failed whenever the stochastic forest didn't happen to mark that
+# exact voxel as canopy — with a handful of observations per site, that
+# could (and did) place zero founders across every replicate, guaranteeing
+# extinction before the simulation even started, independent of any
+# vital-rate parameter.
+#
+# "Matches" here means overall score > 0, not the historical exact-1.0
+# match — with a continuous density-ratio score across three axes, a voxel
+# essentially never hits the joint maximum on all three at once (that would
+# require every axis to peak simultaneously at that height), so requiring
+# score >= 1 would systematically exclude almost every voxel and defeat the
+# whole point of moving off the old hard-threshold box. Any voxel with a
+# nonzero score is inside the plausible climate envelope on every axis.
 # Falls back to unrestricted canopy placement if no voxel matches the niche
 # (species with too few observations to build one, or a niche too narrow for
 # this stochastic forest) so founder placement never silently fails.
@@ -1099,8 +1308,8 @@ plot_3d_abundance_animated <- function(result, out_path = NULL) {
     if (is.null(clim)) return(FALSE)
     niche_match(list(temp   = mean(clim$temp,   na.rm = TRUE),
                      relhum = mean(clim$relhum, na.rm = TRUE),
-                     precip = mean(clim$precip, na.rm = TRUE)),
-                niche_sp) >= 1
+                     swdown = mean(clim$swdown[clim$swdown > 0], na.rm = TRUE)),
+                niche_sp) > 0
   }, logical(1))
 
   candidate_list <- lapply(which(height_ok), function(zi) {

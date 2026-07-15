@@ -47,17 +47,15 @@ GeoJSON field exports
   scripts/complex_model/characterize_niches.R  # pools each species' climate niche across every
                                       # site it was observed at → data/processed/species_niches.rds
         ↓
-  scripts/complex_model/run_colonization_onesite.R  # single-site colonization run
-  scripts/run_colonization_allsites.R  # all-sites loop (or SLURM array)
+  scripts/complex_model/run_colonization_onesite.R  # single-site colonization run (all-sites: batch_exp.sh, SLURM array)
     └── scripts/complex_model/get_colonization.R  # build_forest() · dispersal · establishment
                                       # survival/growth (IPM-style, equation primitives)
         ↓
   scripts/complex_model/make_params.R  # build parameter sweep RDS files for experiments
                                       # (incl. best_case.rds — persistence validation, see Notes)
   scripts/complex_model/batch_exp.sh / run_colonization.sh  # SLURM: 5 sites × experiments in parallel
-  scripts/run_experiments.R           # parallel sensitivity experiments (thesis model)
-  scripts/simple_colonization.R       # standalone 3D model without microclimate
-  scripts/simple_experiments.R        # sensitivity experiments for simple model
+  scripts/simple_model/simple_colonization.R  # standalone 3D model without microclimate
+  scripts/simple_model/simple_experiments.R   # sensitivity experiments for simple model
   scripts/simple_model/run_extinction_heatmap.R  # fine-scale extinction threshold scan
   scripts/complex_model/plot_all.R / plot_functions.R  # all project figures in one pass
 
@@ -106,9 +104,6 @@ sbatch scripts/complex_model/run_height_resolution_experiment.sh Maquipucuna  # 
 
 # Sensitivity experiments (after microclimate is done)
 sbatch scripts/complex_model/batch_exp.sh    # 5 sites × experiments
-
-# Test environment before a full run
-sbatch scripts/hpc_test.sh
 ```
 
 Each microclimate job runs on the `lm_short` partition (large-memory nodes) with 4 CPUs and 500 GB RAM. It loads R/4.4.2, the Miniforge3 conda environment (`canopy_rgee`) for Earth Engine access, and allocates a Lustre scratch workspace for per-height temp files via `ws_allocate`. Logs are written to `logs/log_<jobid>.out`.
@@ -130,7 +125,8 @@ canopymicroenv/
 │   │                                  #   canopy grid, climate helpers, get_clim()
 │   ├── check_microenv_progress.R      # read-only: per-site/height-step regen progress
 │   ├── microenv_array.sh              # submit one microclimate job per site
-│   ├── microenv_helpers.R             # additional microenvironment utilities
+│   ├── helper_functions.R             # shared utilities: CSV col-spec, DMS/date parsing,
+│   │                                  #   canopy-height lookup, GeoJSON→CSV conversion driver
 │   │
 │   │   # ── Complex (microclimate-driven) colonization model ──────────────
 │   ├── complex_model/
@@ -145,37 +141,30 @@ canopymicroenv/
 │   │   │                              #   realistic.rds (persistence validation — see Notes)
 │   │   ├── characterize_niches.R/.sh  # pools each species' climate niche across every site
 │   │   │                              #   it was observed at → data/processed/species_niches.rds
-│   │   ├── check_niche_widths.R       # read-only: inspect per-species niche geometry
+│   │   ├── check_niche_suitability.R  # read-only: inspect per-species niche suitability
 │   │   ├── resolution_diagnostics.R/  # timing-only: climate-cache build + short run cost
 │   │   │   run_resolution_diagnostics.sh  #   across height/horizontal resolution combinations
 │   │   ├── height_resolution_experiment.R/  # outcomes: full best_case.rds runs at each height
 │   │   │   run_height_resolution_experiment.sh  #   step, to check resolution doesn't change results
 │   │   ├── height_res_array.sh        # generate coarser height-step microenv variants
 │   │   ├── batch_exp.sh / run_colonization.sh  # SLURM: sites × experiments in parallel
-│   │   ├── get_colonization.R helpers: helper_functions.R, patches.R, paths.R
+│   │   ├── get_colonization.R helpers: patches.R, paths.R
 │   │   ├── plot_all.R / plot_functions.R  # all project figures in one pass
 │   │   └── check_colonization_progress.sh
 │   │
-│   │   # ── All-sites drivers (top level; reference complex_model/ internally) ──
+│   │   # ── All-sites driver (top level; references complex_model/ internally) ──
 │   ├── allsites.R                     # all-sites run: load models, extract niches, run colonization
-│   ├── run_colonization_allsites.R    # colonization loop: all sites
-│   ├── run_experiments.R              # sensitivity experiment driver (parallel, thesis model)
 │   │
-│   │   # ── Simple / standalone model ─────────────────────────────────────
-│   ├── simple_colonization.R          # standalone 3D colonization model (no microclimate)
-│   ├── simple_experiments.R           # simple model sensitivity experiments + animations
-│   ├── simple_model/                  # additional simple-model analyses
-│   │   ├── run_colonization_allsites.R
-│   │   ├── run_experiments.R
+│   │   # ── Simple / standalone model (no microclimate) ─────────────────────
+│   ├── simple_model/
+│   │   ├── simple_colonization.R      # standalone 3D colonization model (no microclimate)
+│   │   ├── simple_experiments.R       # simple model sensitivity experiments + animations
 │   │   └── run_extinction_heatmap.R   # extinction threshold scan (p_est × repro_rate)
 │   │
-│   │   # ── Literature data ──────────────────────────────────────────────
-│   ├── get_literature_data/           # tooling to extract/organize literature-sourced trait data
-│   │
 │   │   # ── SLURM / environment scripts ────────────────────────────────────
+│   ├── run_pipeline.sh                # menu-driven launcher: chains microenv/params/niche/
+│   │                                  #   experiments/plots via SLURM job dependencies
 │   ├── run_plots.sh                   # run complex_model/plot_all.R (local or interactive node)
-│   ├── hpc_test.sh                    # connectivity / environment smoke test
-│   ├── test_env.R                     # R package + Python environment check
 │   │
 │   │   # ── Data conversion (GeoJSON → CSV) ──────────────────────────────
 │   ├── convert_observations.py        # parse iNaturalist / field GeoJSON → structured CSV

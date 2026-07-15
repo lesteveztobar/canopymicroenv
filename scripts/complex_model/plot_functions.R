@@ -135,13 +135,6 @@ plot_site_map <- function(geojson_dir = file.path(BASE_DIR, "geojson_to_csv", "r
 # 3D temperature volume (interactive, plotly) plus a side-view heatmap +
 # boxplot with Kruskal-Wallis / Dunn post-hoc height comparison, for one
 # site's microenv RDS.
-.build_temp_volume <- function(env_heights, day_type = "tmax", var = "Tz") {
-  layers <- lapply(env_heights, function(h) {
-    r <- h[[day_type]][[var]]
-    if (length(dim(r)) == 3) apply(r, c(1, 2), mean, na.rm = TRUE) else r
-  })
-  abind::abind(layers, along = 3)
-}
 
 plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
                                       processed_dir = PROCESSED_DIR) {
@@ -155,8 +148,19 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
   # load_height()/microenv_heights() (get_colonization.R) handle both the new
   # manifest-only format (.heights + .height_dir, per-height RDS on scratch)
   # and the old format where each height is embedded as its own list element.
-  env_heights <- lapply(heights_m, function(h) load_height(env, h))
-  vol_tmax    <- .build_temp_volume(env_heights, "tmax", "Tz")
+  #
+  # Stream one height at a time instead of loading every height's full raw
+  # per-timestep spatial array into memory at once -- each height's raw
+  # tmax/tmin object is ~6 GB (48 hourly rasters), and with ~170 heights
+  # that's >1 TB, reliably OOM-killing the job regardless of how much memory
+  # is requested. Everything downstream (volume plot, cross-section heatmap,
+  # boxplot) only ever needs the time-averaged 2D Tz layer per height, so
+  # reduce immediately on load and keep only that (tiny) result.
+  tz_layers <- lapply(heights_m, function(hgt) {
+    r <- load_height(env, hgt)$tmax$Tz
+    if (length(dim(r)) == 3) apply(r, c(1, 2), mean, na.rm = TRUE) else r
+  })
+  vol_tmax <- abind::abind(tz_layers, along = 3)
 
   nrow_r  <- dim(vol_tmax)[1]
   ncol_r  <- dim(vol_tmax)[2]
@@ -205,19 +209,15 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
   message("Saved: ", volume_path)
 
   # ── Side-view heatmap + per-height boxplot ────────────────────────────────
-  side_df <- do.call(rbind, lapply(seq_along(env_heights), function(i) {
-    r <- env_heights[[i]]$tmax$Tz
-    m <- if (length(dim(r)) == 3) apply(r, c(1, 2), mean, na.rm = TRUE) else r
-    col_means <- colMeans(m, na.rm = TRUE)
+  side_df <- do.call(rbind, lapply(seq_along(tz_layers), function(i) {
+    col_means <- colMeans(tz_layers[[i]], na.rm = TRUE)
     data.frame(col = seq_along(col_means), height = heights_m[i], Tz = col_means)
   }))
   side_df <- side_df[!is.na(side_df$Tz), ]
 
   # All pixel values per height — more power for the test than col means alone
-  all_px <- do.call(rbind, lapply(seq_along(env_heights), function(i) {
-    r <- env_heights[[i]]$tmax$Tz
-    m <- if (length(dim(r)) == 3) apply(r, c(1, 2), mean, na.rm = TRUE) else r
-    data.frame(height = factor(heights_m[i]), Tz = as.vector(m))
+  all_px <- do.call(rbind, lapply(seq_along(tz_layers), function(i) {
+    data.frame(height = factor(heights_m[i]), Tz = as.vector(tz_layers[[i]]))
   }))
   all_px <- all_px[!is.na(all_px$Tz), ]
 
@@ -284,7 +284,7 @@ plot_temperature_profile <- function(site_name, out_dir = OUTPUT_DIR,
 # ── Best-fit vs. realistic 3D comparison (simple standalone model) ─────────────
 plot_bestfit_3d_comparison <- function(out_dir = OUTPUT_DIR) {
   if (!exists("best_run", inherits = TRUE)) {
-    source("scripts/simple_colonization.R")
+    source("scripts/simple_model/simple_colonization.R")
     best_params <- params
     best_params$establishment_prob <- 0.10
     best_params$repro_rate         <- 500
@@ -320,7 +320,7 @@ plot_bestfit_3d_comparison <- function(out_dir = OUTPUT_DIR) {
   df$pt_size <- pmin(df$n / max(df$n) * 6 + 1, 7)
 
   # Realistic-params run for comparison (above extinction threshold, not saturating)
-  source("scripts/simple_colonization.R")
+  source("scripts/simple_model/simple_colonization.R")
   base_p <- params
   base_p$establishment_prob <- 0.05
   base_p$repro_rate         <- 150
@@ -409,7 +409,6 @@ EXP_PARAM_MAP <- c(
   reproduction_cost         = "cost_repro",
   climate_sensitivity_rh    = "beta_rh",
   precipitation_sensitivity = "beta_precip",
-  niche_tolerance           = "niche_pad",
   founder_number            = "n_founders"
 )
 
@@ -506,6 +505,112 @@ plot_factorial_experiment <- function(site_name, exp_tag = "reproduction_factori
 
   out_path <- file.path(out_dir, sprintf("factorial_%s_%s.png", site_name, exp_tag))
   ggsave(out_path, plot = p, width = 12, height = 8, dpi = 300, bg = "white")
+  message("Saved: ", out_path)
+  invisible(p)
+}
+
+# ── Niche suitability: per-axis scores, and the combined score before/after
+# the per-site ceiling rescale ──────────────────────────────────────────────
+# Pools every (species x height tier) suitability value at a site — from
+# species_niches.rds (characterize_niches.R) and this site's own microenv —
+# into three views: the three per-axis 0-100 scores (temp/relhum/swdown), the
+# combined score BEFORE the per-site rescale (geometric mean of the three
+# axis scores — "multiply, then normalize back to 100", prof feedback
+# 2026-07-15), and the same combined score AFTER (rescaled so this species'
+# best-scoring OWN observed presence height at this site reads 100 — prof
+# feedback 2026-07-15 follow-up; see niche_ceiling()/niche_overall_score() in
+# get_colonization.R). A large gap between BEFORE's max and 100 means this
+# site's climate profile never offers a height where all three axes are
+# simultaneously ideal for that species, so the ceiling rescale is doing real
+# work.
+#
+# extra_species: species to include even if never observed at this site
+# (e.g. to preview a species_subset transplant — see run_colonization_onesite.R's
+# species_file arg). Falls back to this landscape's own best-available height
+# as the ceiling instead of a local observed presence — see niche_ceiling().
+# See check_niche_suitability.R for the text-only per-species version.
+plot_niche_suitability <- function(site_name, out_dir = OUTPUT_DIR,
+                                    processed_dir = PROCESSED_DIR,
+                                    extra_species = character(0)) {
+  niche_cache_path <- file.path(processed_dir, "species_niches.rds")
+  microenv_path     <- file.path(processed_dir, sprintf("microenv_%s.rds", site_name))
+  if (!file.exists(niche_cache_path) || !file.exists(microenv_path)) {
+    message("Skipping ", site_name, " niche suitability -- need both ",
+            niche_cache_path, " and ", microenv_path)
+    return(invisible(NULL))
+  }
+  niche_cache <- readRDS(niche_cache_path)
+  microenv    <- readRDS(microenv_path)
+  heights     <- microenv_heights(microenv)
+
+  message("Building climate cache for ", site_name, " (reads all ", length(heights), " height files once)...")
+  cc <- build_clim_cache(microenv)
+
+  height_scalars      <- height_clim_scalars(cc$clim_by_height)
+  landscape_clim_vals <- height_scalars[stats::complete.cases(height_scalars), , drop = FALSE]
+  clim_by_height <- lapply(seq_len(nrow(height_scalars)), function(i) as.list(height_scalars[i, ]))
+  clim_by_height <- Filter(function(cl) !anyNA(unlist(cl)), clim_by_height)
+
+  niches <- read.csv("data/csv/combinedv3.csv")
+  niches <- niches[!is.na(niches$lat) & !is.na(niches$lon) &
+                   !is.na(niches$Height_m) & !is.na(niches$FinalID), ]
+  site_obs     <- niches[niches$Area_or_Site == site_name, ]
+  site_species <- sort(unique(c(site_obs$FinalID, extra_species)))
+  site_species <- site_species[!vapply(niche_cache[site_species], is.null, logical(1))]
+  if (length(site_species) == 0) {
+    message("Skipping ", site_name, " niche suitability -- no cached niches for this site's species")
+    return(invisible(NULL))
+  }
+
+  rows <- do.call(rbind, lapply(site_species, function(sp) {
+    niche_sp <- niche_cache[[sp]]
+    obs_sp   <- site_obs[site_obs$FinalID == sp & !is.na(site_obs$Height_m), ]
+    obs_clim_vals <- if (nrow(obs_sp) > 0) {
+      do.call(rbind, lapply(obs_sp$Height_m, function(h)
+        height_scalars[which.min(abs(heights - h)), , drop = TRUE]))
+    } else NULL
+    ceiling <- niche_ceiling(niche_sp, obs_clim_vals, landscape_clim_vals)
+
+    axis_scores <- sapply(clim_by_height, function(clim) niche_axis_scores(clim, niche_sp))
+    before <- apply(axis_scores, 2, function(s) .geomean(s))
+    after  <- pmin(100, 100 * before / ceiling)
+    data.frame(species = sp, temp = axis_scores["temp", ], relhum = axis_scores["relhum", ],
+               swdown = axis_scores["swdown", ], before = before, after = after)
+  }))
+
+  # Categorical slots 1/2/3 (blue/green/magenta) for the three niche axes --
+  # first four slots validate all-pairs, fixed order per palette convention.
+  axis_cols <- c(temp = "#2a78d6", relhum = "#008300", swdown = "#e87ba4")
+  axis_df <- data.frame(
+    axis  = factor(rep(c("temp", "relhum", "swdown"), each = nrow(rows)),
+                   levels = c("temp", "relhum", "swdown")),
+    score = c(rows$temp, rows$relhum, rows$swdown)
+  )
+  p_axes <- ggplot(axis_df, aes(x = score, fill = axis)) +
+    geom_histogram(binwidth = 5, boundary = 0, color = "white", linewidth = 0.2) +
+    scale_fill_manual(values = axis_cols, guide = "none") +
+    facet_wrap(~axis, nrow = 1) +
+    labs(x = "Per-axis suitability (0-100)", y = "Height tiers x species",
+         title = sprintf("Niche suitability by axis — %s", site_name)) +
+    theme_minimal(base_size = 11)
+
+  seq_blue <- "#3987e5"
+  p_before <- ggplot(rows, aes(x = before)) +
+    geom_histogram(binwidth = 5, boundary = 0, fill = seq_blue, color = "white", linewidth = 0.2) +
+    labs(x = "Geometric mean (0-100)", y = NULL,
+         title = "Combined score — before per-site ceiling rescale") +
+    theme_minimal(base_size = 11)
+
+  p_after <- ggplot(rows, aes(x = after)) +
+    geom_histogram(binwidth = 5, boundary = 0, fill = seq_blue, color = "white", linewidth = 0.2) +
+    labs(x = "Rescaled (0-100)", y = NULL,
+         title = "Combined score — after per-site ceiling rescale") +
+    theme_minimal(base_size = 11)
+
+  p <- p_axes / (p_before + p_after)
+
+  out_path <- file.path(out_dir, sprintf("niche_suitability_%s.png", site_name))
+  ggsave(out_path, plot = p, width = 11, height = 8, dpi = 300, bg = "white")
   message("Saved: ", out_path)
   invisible(p)
 }

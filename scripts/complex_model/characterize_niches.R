@@ -1,21 +1,47 @@
 # characterize_niches.R
-# Precomputes each species' realized climate niche (temp/RH) pooled across
-# EVERY site where it was observed, not just the one site.rds file happens
-# to be modeling — a species with 2-3 records at one site may have several
-# more at others. Saves data/processed/species_niches.rds, loaded by
+# Precomputes each species' realized climate niche (temp/RH/light) pooled
+# across EVERY site where it was observed, not just the one site.rds file
+# happens to be modeling — a species with 2-3 records at one site may have
+# several more at others. Saves data/processed/species_niches.rds, loaded by
 # init_colonization() (get_colonization.R) in preference to the this-site-
-# only get_niche() fallback.
+# only get_niche() fallback. Also saves data/processed/niche_background_density.rds
+# (the pooled reference distribution every species is scored against), reused
+# by check_niche_suitability.R / plot_niche_suitability() for diagnostics.
+#
+# Niche model (prof feedback 2026-07-15): three axes, one per climate
+# variable (temp, relhum, swdown/light). Each axis gets a continuous 0-100
+# suitability score — a kernel-density ratio of the species' observed
+# ("presence") values against "background" (the pooled distribution of that
+# variable actually available across the landscape: every height tier x
+# month, every site), rescaled so the axis's own peak is 100. See
+# niche_density_model()/build_background_density() in get_colonization.R.
+# This replaces the earlier hard [lo,hi] box + tolerance "pad": with only a
+# handful of observations per species the box was often near zero-width, and
+# the pad needed to fix that was an arbitrary fudge factor. The density-ratio
+# score needs no pad — the kernel bandwidth alone determines how far
+# suitability extends past the observed values, and decays to ~0 once you're
+# beyond where that variable occurs anywhere in the landscape.
 #
 # Each observed individual is augmented with the 12 within-year monthly
 # conditions at its recorded height, rather than collapsed to that height's
 # single annual mean — a species realistically tolerates whatever seasonal
 # range its occupied height experiences over a year, not just that height's
 # average, and pooling the full monthly record turns each raw observation
-# into 12 data points instead of 1, giving a far better-supported niche
-# estimate than the handful of field observations alone could. Each monthly
-# value already averages a representative warm day + cold day (48 hourly
-# values), so it reflects a month-scale typical condition rather than a
-# single transient hour.
+# into 12 data points instead of 1 (helpful for the kernel density fit, not
+# just the old box), giving a far better-supported niche estimate than the
+# handful of field observations alone could. Each monthly value already
+# averages a representative warm day + cold day (48 hourly values), so it
+# reflects a month-scale typical condition rather than a single transient
+# hour. swdown (light) additionally drops zero/night-time readings before
+# averaging, consistent with how light is used elsewhere in the model (see
+# run_pass2_establish()/survival_logit() in get_colonization.R) — a monthly
+# mean that included every dark hour would just be diluted by a fixed
+# day/night ratio rather than reflecting daytime irradiance.
+#
+# The background reference is every height tier's monthly climate at every
+# site (not just observed heights) — "available but not necessarily
+# occupied" conditions, pooled once and shared by every species so all
+# niches are scored against the same yardstick.
 #
 # Rerun this whenever you add observations to data/csv/combinedv3.csv — it's
 # the only step that needs to change; every colonization run downstream picks
@@ -37,18 +63,23 @@ args <- commandArgs(trailingOnly = TRUE)
 HEIGHT_STEP <- if (length(args) >= 1) as.numeric(args[1]) else 0.25
 manifest_suffix <- if (HEIGHT_STEP != 0.1) sprintf("_h%.2f", HEIGHT_STEP) else ""
 
-VARS <- c("temp", "relhum")
+VARS <- NICHE_VARS  # c("temp", "relhum", "swdown") — see get_colonization.R
 
 niches <- read.csv("data/csv/combinedv3.csv")
 niches <- niches[!is.na(niches$lat) & !is.na(niches$lon) &
                  !is.na(niches$Height_m) & !is.na(niches$FinalID), ]
 sites <- sort(unique(niches$Area_or_Site))
 
-# ── Pass 1: per-observation climate, and each site's own vertical climate
-# range (pooled afterwards into one shared reference scale for the
-# minimum-width floor — see niche_geometry() in get_colonization.R). ─────────
-obs_clim_rows  <- list()
-site_ranges    <- list()
+# Monthly mean of variable `v` in climate table `cl` for calendar month `m`,
+# via .niche_var_mean() (get_colonization.R) — swdown drops zero/night-time
+# readings first (see header note above); temp/relhum use every hourly
+# reading in the month.
+.monthly_var_mean <- function(cl, v, m) .niche_var_mean(cl[cl$month == m, , drop = FALSE], v)
+
+# ── Pass 1: per-observation ("presence") climate, and every height tier's
+# monthly climate at every site ("background", pooled below) ────────────────
+obs_clim_rows <- list()
+bg_clim_rows  <- list()
 
 for (s in sites) {
   microenv_path <- file.path(PROCESSED_DIR, sprintf("microenv_%s%s.rds", s, manifest_suffix))
@@ -61,23 +92,24 @@ for (s in sites) {
   heights  <- microenv_heights(microenv)
   cc       <- build_clim_cache(microenv)
 
-  # Annual-mean scalar per height — used only for the site's own vertical
-  # climate range below (the minimum-width floor's reference scale), not for
-  # the niche bounds themselves.
-  clim_scalars <- do.call(rbind, lapply(cc$clim_by_height, function(cl) {
-    if (is.null(cl)) return(setNames(rep(NA_real_, length(VARS)), VARS))
-    vapply(VARS, function(v) mean(cl[[v]], na.rm = TRUE), numeric(1))
-  }))
-  site_ranges[[s]] <- apply(clim_scalars, 2, function(x) diff(range(x, na.rm = TRUE)))
-
   # Monthly-mean climate per height (12 rows x length(VARS)): each row
   # averages that month's representative warm + cold day (48 hourly values),
   # capturing within-year seasonal variation instead of one collapsed annual
   # mean.
   clim_monthly <- lapply(cc$clim_by_height, function(cl) {
     if (is.null(cl)) return(matrix(NA_real_, nrow = 12, ncol = length(VARS), dimnames = list(NULL, VARS)))
-    sapply(VARS, function(v) vapply(1:12, function(m) mean(cl[[v]][cl$month == m], na.rm = TRUE), numeric(1)))
+    sapply(VARS, function(v) vapply(1:12, function(m) .monthly_var_mean(cl, v, m), numeric(1)))
   })
+
+  # Every height tier's monthly climate feeds the background pool, whether
+  # or not any species was observed at that height — this is "what's
+  # available", not "what's occupied".
+  for (h_idx in seq_along(clim_monthly)) {
+    for (m in 1:12) {
+      row <- clim_monthly[[h_idx]][m, ]
+      if (all(!is.na(row))) bg_clim_rows[[length(bg_clim_rows) + 1]] <- row
+    }
+  }
 
   obs_site <- niches[niches$Area_or_Site == s, ]
   for (i in seq_len(nrow(obs_site))) {
@@ -95,21 +127,20 @@ for (s in sites) {
 }
 
 if (length(obs_clim_rows) == 0) stop("No usable observations across any site with a microenv file.")
+if (length(bg_clim_rows) == 0) stop("No usable background climate across any site with a microenv file.")
 
 obs_df <- as.data.frame(do.call(rbind, obs_clim_rows), stringsAsFactors = FALSE)
 for (v in VARS) obs_df[[v]] <- as.numeric(obs_df[[v]])
 
-# Shared reference scale for the minimum-width floor: the largest per-height
-# climate range seen at any single site, so the floor stays meaningful (not
-# swamped) regardless of how many sites happen to be included.
-min_width_frac <- 0.10
-site_range_mat <- do.call(rbind, site_ranges)
-ref_range      <- apply(site_range_mat, 2, max, na.rm = TRUE)
-min_width      <- min_width_frac * ref_range
-message(sprintf("Reference vertical climate range (max across sites): temp=%.2f C, RH=%.2f %%",
-                ref_range["temp"], ref_range["relhum"]))
+bg_df <- as.data.frame(do.call(rbind, bg_clim_rows), stringsAsFactors = FALSE)
+message(sprintf("Background pool: %d voxel-months across %d site(s)", nrow(bg_df), length(sites)))
 
-# ── Pass 2: pooled niche geometry per species, across every site it was
+bg_density <- build_background_density(bg_df, VARS)
+bg_out_path <- file.path(PROCESSED_DIR, "niche_background_density.rds")
+saveRDS(bg_density, bg_out_path)
+message("Saved background density to ", bg_out_path)
+
+# ── Pass 2: pooled niche model per species, across every site it was
 # observed at ────────────────────────────────────────────────────────────────
 species_ids <- sort(unique(obs_df$species))
 niche_cache <- lapply(species_ids, function(sp) {
@@ -118,7 +149,7 @@ niche_cache <- lapply(species_ids, function(sp) {
   n_sites   <- length(unique(niches$Area_or_Site[niches$FinalID == sp]))
   message(sprintf("%-30s %3d observations (%4d monthly data points) across %d site(s)",
                   sp, n_obs, nrow(clim_vals), n_sites))
-  niche_geometry(clim_vals, min_width)
+  niche_density_model(clim_vals, bg_density, VARS)
 })
 names(niche_cache) <- species_ids
 

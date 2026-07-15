@@ -5,7 +5,7 @@
 library(dplyr)
 library(readr)
 library(rgee)
-source("scripts/complex_model/helper_functions.R")
+source("scripts/helper_functions.R")
 source("scripts/get_climateinputs.R")
 source("scripts/get_microenv.R")
 source("scripts/complex_model/get_colonization.R")

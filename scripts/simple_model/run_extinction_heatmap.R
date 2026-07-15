@@ -9,7 +9,7 @@
 # Lizeth Estévez Tobar — University of Bonn, 2026
 # ─────────────────────────────────────────────────────────────────────────────
 
-source("scripts/simple_colonization.R")
+source("scripts/simple_model/simple_colonization.R")
 library(parallel)
 library(ggplot2)
 

@@ -28,7 +28,7 @@ reticulate::use_python(PYTHON_PATH, required = TRUE)
 source("scripts/get_microenv.R")
 source("scripts/get_climateinputs.R")
 source("scripts/complex_model/paths.R")
-source("scripts/complex_model/helper_functions.R")
+source("scripts/helper_functions.R")
 
 mycredentials <- readRDS(file.path("/home/s38leste_hpc/canopymicroenv/credentials.rds"))
 
