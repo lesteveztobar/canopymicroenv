@@ -1,0 +1,3 @@
+Error in bench("averaged", quote({ : could not find function "bench"
+Calls: main
+Execution halted
