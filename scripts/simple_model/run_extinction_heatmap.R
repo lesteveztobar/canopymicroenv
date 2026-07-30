@@ -42,9 +42,9 @@ run_one <- function(i) {
   )
 
   # extinct if no adults remain in final 10 years
-  final_A <- out$abundA[, , , (TIMESTEPS - 9):TIMESTEPS]
+  final_A <- out$abundanceA[, , , (TIMESTEPS - 9):TIMESTEPS]
   extinct  <- all(final_A == 0)
-  total_A  <- sum(out$abundA[, , , TIMESTEPS])
+  total_A  <- sum(out$abundanceA[, , , TIMESTEPS])
 
   list(p_est = grid$p_est[i], repro = grid$repro[i],
        extinct = extinct, final_A = total_A)

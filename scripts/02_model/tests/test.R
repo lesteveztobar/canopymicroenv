@@ -624,7 +624,7 @@ runcolonization_spatial <- function(site, niches, canopy_grid, microenv,
     list(
         abundanceS = abundanceS, abundanceJ = abundanceJ, abundanceA = abundanceA,
         totalabundanceS = totalS, totalabundanceJ = totalJ, totalabundanceA = totalA,
-        state = state, niches_train = niches_train, niches_val = niches_val
+        state = state, obs_train = niches_train, obs_val = niches_val
     )
 }
 

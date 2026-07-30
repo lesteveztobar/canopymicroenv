@@ -60,9 +60,9 @@ superforgivingparams <- list(
   sigma        = 0.8,   # literature: 0.5
   
   # ── Survival (Raventós et al. 2015) ──
-  beta0Seedling = 2.0,  # literature: -1.5
-  beta0Juvenile = 2.5,  # literature: -0.5
-  beta0Adult    = 3.0,  # literature:  1.0
+  beta0_S = 2.0,  # literature: -1.5
+  beta0_J = 2.5,  # literature: -0.5
+  beta0_A    = 3.0,  # literature:  1.0
   beta1         = 0.105,
   
   # ── Reproduction ──

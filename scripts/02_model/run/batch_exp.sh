@@ -46,7 +46,7 @@ mapfile -t SITES < <(awk -F, 'NR>1 && $2!="" {print $2}' "$CANOPY_OBS_CSV" | sor
 # EXP and PARAMS are paired by index — PARAMS[k] is the RDS make_params.R
 # built for the experiment EXP[k]. Keep these two arrays in sync.
 EXP=("pollination_success" "adult_survival_intercept" "germination_probability" "reproduction_cost" "climate_sensitivity_rh" "precipitation_sensitivity" "founder_number" "reproduction_factorial")
-PARAMS=("p_poll.rds" "beta0A.rds" "p_germ.rds" "cost_repro.rds" "beta_rh.rds" "beta_precip.rds" "n_founders.rds" "reproduction_factorial.rds")
+PARAMS=("p_poll.rds" "beta0_A.rds" "p_germ.rds" "cost_repro.rds" "beta_rh.rds" "beta_precip.rds" "n_founders.rds" "reproduction_factorial.rds")
 
 PARAMS_DIR="/home/$USER/canopymicroenv/data/params"
 

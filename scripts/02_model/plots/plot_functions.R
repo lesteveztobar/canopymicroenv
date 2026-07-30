@@ -402,13 +402,13 @@ plot_bestfit_3d_comparison <- function(out_dir = OUTPUT_DIR) {
   p      <- best_run$params
   T_last <- p$timesteps
 
-  abundA_last <- best_run$abundA[, , , T_last]
+  abundanceA_last <- best_run$abundanceA[, , , T_last]
   zone_arr    <- best_run$zone
 
-  idx <- which(abundA_last > 0, arr.ind = TRUE)
+  idx <- which(abundanceA_last > 0, arr.ind = TRUE)
   df  <- data.frame(
     x = idx[, 1], y = idx[, 2], z = idx[, 3],
-    n = abundA_last[idx], zone = zone_arr[idx]
+    n = abundanceA_last[idx], zone = zone_arr[idx]
   )
   df$x_m <- (df$x - 0.5) * p$resolution
   df$y_m <- (df$y - 0.5) * p$resolution
@@ -436,15 +436,15 @@ plot_bestfit_3d_comparison <- function(out_dir = OUTPUT_DIR) {
   ))
 
   make_df <- function(run_out, timestep) {
-    abA  <- run_out$abundA[, , , timestep]
+    abundanceA <- run_out$abundanceA[, , , timestep]
     zArr <- run_out$zone
-    idx  <- which(abA > 0, arr.ind = TRUE)
+    idx  <- which(abundanceA > 0, arr.ind = TRUE)
     if (nrow(idx) == 0) return(NULL)
     data.frame(
       x_m = (idx[, 1] - 0.5) * run_out$params$resolution,
       y_m = (idx[, 2] - 0.5) * run_out$params$resolution,
       z_m = (idx[, 3] - 0.5) * (run_out$params$max_height / run_out$params$zDim),
-      n = abA[idx], zone = zArr[idx]
+      n = abundanceA[idx], zone = zArr[idx]
     )
   }
 
@@ -506,7 +506,7 @@ plot_bestfit_3d_comparison <- function(out_dir = OUTPUT_DIR) {
 # pairing in scripts/batch_exp.sh.
 EXP_PARAM_MAP <- c(
   pollination_success       = "p_poll",
-  adult_survival_intercept  = "beta0A",
+  adult_survival_intercept  = "beta0_A",
   germination_probability   = "p_germ",
   reproduction_cost         = "cost_repro",
   climate_sensitivity_rh    = "beta_rh",

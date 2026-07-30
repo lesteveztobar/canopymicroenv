@@ -140,13 +140,13 @@ if (!is.null(params_file) && file.exists(params_file)) {
   params <- list(
     # ── s(z, e): survival (monthly-compounded — see survival_logit() in ────
     # get_colonization.R for the p_month = p_annual^(1/12) derivation) ─────
-    beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+    beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
     beta1   =  0.10,
     s_S_min =  0.0,  s_S_max =  1.0,
     s_J_min =  1.0,  s_J_max =  7.0,
     s_A_min =  7.0,  s_A_max = 20.0,
     # ── g(z'|z, e): growth / stage transitions (monthly-compounded — ───────
-    # q_month = 1-(1-p_annual)^(1/12), see growth_prob() in get_colonization.R)
+    # q_month = 1-(1-p_annual)^(1/12), see transition_logit() in get_colonization.R)
     psi0S        = -3.30 - 2.577,  psi0J        = -2.70 - 2.619,
     beta_precip  =  3e-4,  beta_rh      =  0.010,
     sigma        =  0.10,  delta_s_base =  0.80,
