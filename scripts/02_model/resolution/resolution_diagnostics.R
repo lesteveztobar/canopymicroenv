@@ -47,7 +47,7 @@ forestparams <- list(
 )
 
 params <- list(
-  beta0S = -0.24, beta0J = 0.41, beta0A = 1.73, beta1 = 0.10,
+  beta0_S = -0.24, beta0_J = 0.41, beta0_A = 1.73, beta1 = 0.10,
   s_S_min = 0.0, s_S_max = 1.0, s_J_min = 1.0, s_J_max = 7.0,
   s_A_min = 7.0, s_A_max = 20.0,
   psi0S = -3.30, psi0J = -2.70, beta_precip = 3e-4, beta_rh = 0.010,

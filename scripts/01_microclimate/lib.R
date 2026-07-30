@@ -856,7 +856,7 @@ extract_niches <- function(obs, models, valid_per_model) {
 
 # TODO: match to nearest ERA5 cell for [x,y] position rather than always
 #       using first valid cell — adequate for prototype
-get_clim <- function(site_name, height, models, valid_per_model) {
+get_point_model_clim <- function(site_name, height, models, valid_per_model) {
   h_key  <- sprintf("%s_h%.1f", site_name, height)
   cell_c <- valid_per_model[[h_key]][1]
   if (is.null(cell_c) || is.na(cell_c)) return(NULL)
@@ -866,7 +866,7 @@ get_clim <- function(site_name, height, models, valid_per_model) {
 # Extracts a monthly slice of hourly weather data.
 # Divides the 672-hour weather dataframe into 12 equal chunks of 56 hours.
 # TODO: replace with real calendar month slicing once annual ERA5 data available
-get_clim_month <- function(clim, month) {
+get_point_model_clim_month <- function(clim, month) {
   if (is.null(clim) || nrow(clim) == 0) {
     return(NULL)
   }

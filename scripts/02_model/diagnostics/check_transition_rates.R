@@ -2,7 +2,7 @@
 # Diagnostic: compute the actual monthly and annual-equivalent S->J and
 # J->A transition probabilities under a given params list, to check whether
 # a params combination causes individuals to race through the J stage
-# faster than the annual census can catch them (see growth_prob() /
+# faster than the annual census can catch them (see transition_logit() /
 # run_pass3_survive_grow() in get_colonization.R -- psi0S/psi0J are
 # calibrated as "monthly-equivalent" assuming DEFAULT beta_precip/beta_rh;
 # pushing those slopes to extreme values, as best_case.rds does, breaks
@@ -30,8 +30,8 @@ rh_vals     <- c(75, 85, 95)        # %
 
 for (precip in precip_vals) {
   for (rh in rh_vals) {
-    p_StoJ_month <- growth_prob("S", precip, rh, p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
-    p_JtoA_month <- growth_prob("J", precip, rh, p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
+    p_StoJ_month <- transition_logit("S", precip, rh, p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
+    p_JtoA_month <- transition_logit("J", precip, rh, p$psi0S, p$psi0J, p$beta_precip, p$beta_rh)
 
     # Probability of transitioning at least once across 12 months
     p_StoJ_year <- 1 - (1 - p_StoJ_month)^12

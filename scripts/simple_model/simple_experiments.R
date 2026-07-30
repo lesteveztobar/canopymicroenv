@@ -110,8 +110,8 @@ animate_colonization <- function(result, filename = NULL, fps = 4,
   if (what == "abundance") {
     # Side view: sum adults + seedlings over x → [yDim, zDim] per timestep
     frames <- do.call(rbind, lapply(1:T, function(t) {
-      A <- apply(result$abundA[,,,t], c(2, 3), sum)  # [yDim, zDim]
-      S <- apply(result$abundS[,,,t], c(2, 3), sum)
+      A <- apply(result$abundanceA[,,,t], c(2, 3), sum)  # [yDim, zDim]
+      S <- apply(result$abundanceS[,,,t], c(2, 3), sum)
       do.call(rbind, lapply(seq_along(heights), function(z)
         data.frame(y = 1:yDim, height = heights[z], t = t,
                    adults = A[, z], seedlings = S[, z])
@@ -175,7 +175,7 @@ plot_3d_abundance <- function(result, t = NULL) {
   if (is.null(t)) t <- T
 
   # Build long data frame of occupied adult voxels
-  idx <- which(result$abundA[,,,t] > 0, arr.ind = TRUE)
+  idx <- which(result$abundanceA[,,,t] > 0, arr.ind = TRUE)
   if (nrow(idx) == 0) { message("No adults at t=", t); return(invisible(NULL)) }
 
   df <- data.frame(
@@ -183,7 +183,7 @@ plot_3d_abundance <- function(result, t = NULL) {
     y       = idx[, 2],
     z       = idx[, 3],
     height  = result$heights[idx[, 3]],
-    N       = result$abundA[,,,t][idx],
+    N       = result$abundanceA[,,,t][idx],
     zone    = result$zone[idx]
   )
 

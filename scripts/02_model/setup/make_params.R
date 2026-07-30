@@ -1,6 +1,6 @@
 source("scripts/02_model/config/paths.R")
 
-# beta0S/beta0J/beta0A and psi0S/psi0J below are all written as the original
+# beta0_S/beta0_J/beta0_A and psi0S/psi0J below are all written as the original
 # literature-calibrated value plus an explicit offset (e.g. `-0.24 + 2.889`),
 # rather than a single pre-computed number, so the monthly-compounding
 # recalibration stays visible and auditable here. survival_logit() is
@@ -24,7 +24,7 @@ N_FOUNDERS_DEFAULT <- 30
 
 params_ppoll <- list(
     # ── s(z, e): survival ────────────────────────────────────────────────────
-    beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+    beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
     beta1   =  0.10,
     s_S_min =  0.0,  s_S_max =  1.0,
     s_J_min =  1.0,  s_J_max =  7.0,
@@ -48,10 +48,10 @@ out_path <- file.path(PARAMS_DIR, "p_poll.rds")
 saveRDS(params_ppoll, out_path)
 
 
-params_beta0A <- list(
+params_beta0_A <- list(
     # ── s(z, e): survival ────────────────────────────────────────────────────
-    beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,
-    beta0A  =  c(0.50, 1.00, 1.73, 2.50, 3.50) + 2.563,  # shifted range preserves relative meaning of each level
+    beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,
+    beta0_A  =  c(0.50, 1.00, 1.73, 2.50, 3.50) + 2.563,  # shifted range preserves relative meaning of each level
     beta1   =  0.10,
     s_S_min =  0.0,  s_S_max =  1.0,
     s_J_min =  1.0,  s_J_max =  7.0,
@@ -70,12 +70,12 @@ params_beta0A <- list(
 )
 
 
-out_path <- file.path(PARAMS_DIR, "beta0A.rds")
-saveRDS(params_beta0A, out_path)
+out_path <- file.path(PARAMS_DIR, "beta0_A.rds")
+saveRDS(params_beta0_A, out_path)
 
 params_pgerm <- list(
 # ── s(z, e): survival ────────────────────────────────────────────────────
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,
@@ -98,7 +98,7 @@ saveRDS(params_pgerm, out_path)
 
 params_costrepro <- list(
 # ── s(z, e): survival ────────────────────────────────────────────────────
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,
@@ -121,7 +121,7 @@ saveRDS(params_costrepro, out_path)
 
 params_betarh <- list(
 # ── s(z, e): survival ────────────────────────────────────────────────────
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,
@@ -144,7 +144,7 @@ saveRDS(params_betarh, out_path)
 
 params_betaprecip <- list(
 # ── s(z, e): survival ────────────────────────────────────────────────────
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,
@@ -176,7 +176,7 @@ saveRDS(params_betaprecip, out_path)
 # files so every other experiment (including the reproduction factorial)
 # uses a founder count that's actually viable.
 params_nfounders <- list(
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,
@@ -220,7 +220,7 @@ saveRDS(params_nfounders, out_path)
 # -- don't regenerate reproduction_factorial.rds from this block expecting
 # it to mean the same thing anymore.
 params_reprofactorial <- list(
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,
@@ -273,7 +273,7 @@ saveRDS(params_reprofactorial, out_path)
 # realistic itself dies, anything below it dies too. Left here for
 # provenance only.
 params_reprofactorial_v2 <- list(
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,
@@ -314,7 +314,7 @@ saveRDS(params_reprofactorial_v2, out_path)
 # sweep can re-space that parameter logarithmically or narrow the range
 # further around wherever the transition actually falls.
 params_reprofactorial_v3 <- list(
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,
@@ -343,7 +343,7 @@ saveRDS(params_reprofactorial_v3, out_path)
 # unlucky stochastic draw" — see project memory on the niche/founder/
 # capacity-saturation investigation for why this matters here specifically.
 params_bestcase <- list(
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  3.50 + 2.563,   # max tested (best survival)
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  3.50 + 2.563,   # max tested (best survival)
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,
@@ -374,7 +374,7 @@ saveRDS(params_bestcase, out_path)
 # lower bound raised off the literature default, or whether the default
 # already sits inside the persisting region.
 params_realistic <- list(
-beta0S  = -0.24 + 2.889,  beta0J  =  0.41 + 2.729,  beta0A  =  1.73 + 2.563,
+beta0_S  = -0.24 + 2.889,  beta0_J  =  0.41 + 2.729,  beta0_A  =  1.73 + 2.563,
 beta1   =  0.10,
 s_S_min =  0.0,  s_S_max =  1.0,
 s_J_min =  1.0,  s_J_max =  7.0,

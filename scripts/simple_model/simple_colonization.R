@@ -171,17 +171,17 @@ run_simple_colonization <- function(p = params, seed = NULL) {
               100 * nrow(valid_voxels) / prod(dim(landscape))))
 
   # Abundance arrays [xDim, yDim, zDim, T]
-  abundS <- array(0L, dim = c(xDim, yDim, zDim, T))
-  abundA <- array(0L, dim = c(xDim, yDim, zDim, T))
+  abundanceS <- array(0L, dim = c(xDim, yDim, zDim, T))
+  abundanceA <- array(0L, dim = c(xDim, yDim, zDim, T))
 
   # Place founders at random valid voxels
   founder_idx <- valid_voxels[sample(nrow(valid_voxels),
                                      min(p$n_founders, nrow(valid_voxels))), ]
   for (i in seq_len(nrow(founder_idx)))
-    abundA[founder_idx[i,1], founder_idx[i,2], founder_idx[i,3], 1] <- 1L
+    abundanceA[founder_idx[i,1], founder_idx[i,2], founder_idx[i,3], 1] <- 1L
 
   totalS <- integer(T); totalA <- integer(T)
-  totalS[1] <- sum(abundS[,,,1]); totalA[1] <- sum(abundA[,,,1])
+  totalS[1] <- sum(abundanceS[,,,1]); totalA[1] <- sum(abundanceA[,,,1])
   # side-view dispersal history: sum Disp over x → [yDim, zDim, T]
   disp_side <- array(0L, dim = c(yDim, zDim, T))
   cat(sprintf("  Founders: %d adults placed\n", totalA[1]))
@@ -190,10 +190,10 @@ run_simple_colonization <- function(p = params, seed = NULL) {
 
     # ── Dispersal: adults produce seeds ────────────────────────────────────────
     Disp <- array(0L, dim = c(xDim, yDim, zDim))
-    nonzero_A <- which(abundA[,,,t] > 0, arr.ind = TRUE)
+    nonzero_A <- which(abundanceA[,,,t] > 0, arr.ind = TRUE)
     for (i in seq_len(nrow(nonzero_A))) {
       x <- nonzero_A[i,1]; y <- nonzero_A[i,2]; z <- nonzero_A[i,3]
-      n_seeds <- rpois(1, abundA[x,y,z,t] * p$repro_rate)
+      n_seeds <- rpois(1, abundanceA[x,y,z,t] * p$repro_rate)
       if (n_seeds > 0)
         Disp <- disperse_simple(x, y, z, n_seeds, xDim, yDim, zDim,
                                 p$maxDisp, p$maxDispZ, Disp)
@@ -203,9 +203,9 @@ run_simple_colonization <- function(p = params, seed = NULL) {
     # ── Establishment: vectorized over all cells with seeds ───────────────────
     # Only consider valid landscape cells that have seed rain and aren't full.
     can_establish <- Disp > 0 & landscape &
-                     (abundS[,,,t] + abundA[,,,t]) < p$carCap
+                     (abundanceS[,,,t] + abundanceA[,,,t]) < p$carCap
     if (any(can_establish)) {
-      space     <- as.integer(p$carCap - abundS[,,, t] - abundA[,,,t])
+      space     <- as.integer(p$carCap - abundanceS[,,, t] - abundanceA[,,,t])
       p_est_arr <- p$establishment_prob * suitability   # [xDim,yDim,zDim]
       new_s     <- pmin(
         array(rbinom(prod(dim(Disp)), as.vector(Disp), as.vector(p_est_arr)),
@@ -213,46 +213,46 @@ run_simple_colonization <- function(p = params, seed = NULL) {
         space
       )
       new_s[!can_establish] <- 0L
-      abundS[,,,t+1] <- abundS[,,,t+1] + new_s
+      abundanceS[,,,t+1] <- abundanceS[,,,t+1] + new_s
     }
 
     # ── Survival and maturation: vectorized over all occupied cells ───────────
-    has_S <- abundS[,,,t] > 0
-    has_A <- abundA[,,,t] > 0
+    has_S <- abundanceS[,,,t] > 0
+    has_A <- abundanceA[,,,t] > 0
 
     if (any(has_S)) {
-      nS_vec    <- abundS[,,,t]
+      nS_vec    <- abundanceS[,,,t]
       surv_S    <- array(rbinom(prod(dim(nS_vec)), as.vector(nS_vec),
                                 as.vector(p$survival_S * suitability)),
                          dim = dim(nS_vec))
       matures   <- array(rbinom(prod(dim(surv_S)), as.vector(surv_S),
                                 p$maturation_prob),
                          dim = dim(surv_S))
-      abundS[,,,t+1] <- abundS[,,,t+1] + surv_S - matures
-      abundA[,,,t+1] <- abundA[,,,t+1] + matures
+      abundanceS[,,,t+1] <- abundanceS[,,,t+1] + surv_S - matures
+      abundanceA[,,,t+1] <- abundanceA[,,,t+1] + matures
     }
 
     if (any(has_A)) {
-      nA_vec  <- abundA[,,,t]
+      nA_vec  <- abundanceA[,,,t]
       surv_A  <- array(rbinom(prod(dim(nA_vec)), as.vector(nA_vec),
                                as.vector(p$survival_A * (0.5 + 0.5 * suitability))),
                         dim = dim(nA_vec))
-      abundA[,,,t+1] <- abundA[,,,t+1] + surv_A
+      abundanceA[,,,t+1] <- abundanceA[,,,t+1] + surv_A
     }
 
     # Enforce carCap — trim excess adults (rare edge case)
-    total_next <- abundS[,,,t+1] + abundA[,,,t+1]
+    total_next <- abundanceS[,,,t+1] + abundanceA[,,,t+1]
     over       <- total_next > p$carCap
     if (any(over))
-      abundA[,,,t+1] <- pmax(0L, abundA[,,,t+1] - pmax(0L, total_next - p$carCap)) * 1L
+      abundanceA[,,,t+1] <- pmax(0L, abundanceA[,,,t+1] - pmax(0L, total_next - p$carCap)) * 1L
 
-    totalS[t+1] <- sum(abundS[,,,t+1])
-    totalA[t+1] <- sum(abundA[,,,t+1])
+    totalS[t+1] <- sum(abundanceS[,,,t+1])
+    totalA[t+1] <- sum(abundanceA[,,,t+1])
     cat(sprintf("t=%2d | S=%4d  A=%4d  total=%4d | seeds dispersed=%d\n",
                 t+1, totalS[t+1], totalA[t+1], totalS[t+1]+totalA[t+1], sum(Disp)))
   }
 
-  list(abundS = abundS, abundA = abundA,
+  list(abundanceS = abundanceS, abundanceA = abundanceA,
        totalS = totalS, totalA = totalA,
        disp_side = disp_side,
        landscape = landscape, zone = forest$zone,
@@ -287,7 +287,7 @@ print(p_traj)
 
 # Plot 2: side-view heatmap of adult abundance at final timestep
 # Collapse x (W–E) by summing → abundance as function of (y, height)
-final_A <- result$abundA[,,,T]
+final_A <- result$abundanceA[,,,T]
 side_df <- do.call(rbind, lapply(seq_along(result$heights), function(z) {
   data.frame(
     y      = seq_len(params$yDim),
@@ -315,7 +315,7 @@ zone_time <- do.call(rbind, lapply(1:T, function(t) {
   do.call(rbind, lapply(1:5, function(z_val) {
     mask <- zone_arr == z_val
     data.frame(t = t, zone = z_val,
-               N = sum(result$abundA[,,,t][mask], na.rm = TRUE))
+               N = sum(result$abundanceA[,,,t][mask], na.rm = TRUE))
   }))
 }))
 zone_time$zone <- factor(zone_time$zone, labels = c(
